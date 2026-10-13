@@ -1,0 +1,133 @@
+@use 'variables' as *;
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html, body {
+    margin: 0;
+    min-height: 100%;
+    background: $bg linear-gradient(to bottom, #2e2a24 0, $bg 116px) no-repeat;
+    color: $text;
+    font: 14px/1.4 $font;
+    -webkit-tap-highlight-color: transparent;
+}
+
+button, input, textarea { font: inherit; color: inherit; }
+button { cursor: pointer; }
+button:disabled { cursor: default; opacity: .45; }
+[hidden] { display: none !important; }
+
+.dim { color: $dim; }
+.small { font-size: 12px; }
+.center { text-align: center; }
+.pad { padding: 10px 12px; margin: 0; }
+.accent { color: $accent; }
+
+.card {
+    background: $card;
+    border-radius: $radius;
+    box-shadow: $shadow;
+}
+
+.btn {
+    border: 0;
+    border-radius: $radius;
+    padding: 8px 14px;
+    font-weight: 600;
+    text-transform: uppercase;
+    font-size: 12px;
+    letter-spacing: .03em;
+    background: $card-alt;
+    color: $text-strong;
+    box-shadow: $shadow;
+    transition: background .15s, filter .15s;
+
+    &:hover:not(:disabled) { filter: brightness(1.15); }
+    &.primary { background: $accent-strong; color: #fff; }
+    &.danger { background: #6b2a2a; color: #fff; }
+    &.danger:hover:not(:disabled) { background: $bad; }
+    &.secondary { background: #3c3934; }
+    &.small { padding: 4px 9px; font-size: 11px; }
+    &.wide { display: block; width: calc(100% - 24px); margin: 4px 12px 12px; }
+}
+
+.link {
+    background: none;
+    border: 0;
+    padding: 0;
+    color: $accent;
+    &:hover { text-decoration: underline; }
+}
+
+.icon-btn {
+    background: none;
+    border: 0;
+    border-radius: $radius;
+    color: $text;
+    min-width: 34px;
+    height: 34px;
+    font-size: 16px;
+    &:hover:not(:disabled) { background: rgba(255, 255, 255, .08); color: $text-strong; }
+}
+
+.pill {
+    display: inline-block;
+    min-width: 18px;
+    padding: 0 5px;
+    border-radius: 9px;
+    font-size: 11px;
+    line-height: 18px;
+    background: #444;
+    color: #ddd;
+    text-align: center;
+    &:empty { display: none; }
+    &.hot { background: $fire; color: #fff; }
+}
+
+.badge {
+    font-size: 10px;
+    text-transform: uppercase;
+    padding: 0 4px;
+    border-radius: 3px;
+    background: #444;
+    color: #ccc;
+    vertical-align: middle;
+}
+
+.status-dot {
+    display: inline-block;
+    flex: none;
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    border: 1px solid #666;
+    background: transparent;
+    &.online { background: $good; border-color: $good; }
+    &.online.playing, &.online.tournament { background: $fire; border-color: $fire; }
+    &.online.computer { background: #b0a020; border-color: #b0a020; }
+}
+
+.side-dot {
+    display: inline-block;
+    width: 11px;
+    height: 11px;
+    border-radius: 50%;
+    border: 1px solid #888;
+    margin-right: 6px;
+    vertical-align: -1px;
+    &.w { background: #fff; }
+    &.b { background: #000; }
+}
+
+.spinner {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    margin-right: 8px;
+    vertical-align: -2px;
+    border: 2px solid $dim;
+    border-top-color: transparent;
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }

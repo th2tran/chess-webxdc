@@ -1,0 +1,192 @@
+/* Game record: position + move history + chess clock. Shared by computer and network games. */
+import { Chess, type Color, type GameResult, type PieceType, type Status } from './engine.ts';
+import type { Clock, PlayerRef } from './net.ts';
+
+export type GameKind = 'computer' | 'network' | 'tournament';
+
+export interface PlyRecord {
+    uci: string;
+    san: string;
+    from: string;
+    to: string;
+    color: Color;
+    captured: PieceType | null;
+    fen: string;
+    check: boolean;
+    clock: Clock | null;
+}
+
+export interface GameInit {
+    id: string;
+    kind: GameKind;
+    white: PlayerRef;
+    black: PlayerRef;
+    /** Initial time per side in ms; 0 means untimed. */
+    tc: number;
+    startTs: number;
+    tourId?: string | null;
+    cid?: string | null;
+    level?: number;
+}
+
+export const NETWORK_TC_MS = 5 * 60 * 1000;
+/** Extra time granted to a silent opponent before their flag is claimed (network latency). */
+export const FLAG_GRACE_MS = 2500;
+
+export function opposite(c: Color): Color { return c === 'w' ? 'b' : 'w'; }
+
+export function describeResult(result: GameResult | null, reason: string | null): string {
+    if (!result) return '';
+    const winner = result === '1-0' ? 'White is victorious' : result === '0-1' ? 'Black is victorious' : 'Draw';
+    const why = reason ? reason.charAt(0).toUpperCase() + reason.slice(1) : '';
+    if (result === '1/2-1/2') return why ? `${why} • Draw` : 'Draw';
+    return why ? `${why} • ${winner}` : winner;
+}
+
+export class GameRecord {
+    readonly id: string;
+    readonly kind: GameKind;
+    readonly white: PlayerRef;
+    readonly black: PlayerRef;
+    readonly tc: number;
+    readonly startTs: number;
+    readonly tourId: string | null;
+    readonly cid: string | null;
+    readonly level: number;
+    readonly chess = new Chess();
+    readonly startFen: string;
+    plies: PlyRecord[] = [];
+    clock: Clock;
+    turnStart: number;
+    over = false;
+    result: GameResult | null = null;
+    reason: string | null = null;
+    endTs: number | null = null;
+    /** Address of the player currently offering a draw. */
+    drawOffer: string | null = null;
+    /** Out-of-order moves waiting for missing plies. */
+    pending = new Map<number, { uci: string; clock: Clock; at: number }>();
+    lastSyncRequest = 0;
+
+    constructor(init: GameInit) {
+        this.id = init.id;
+        this.kind = init.kind;
+        this.white = init.white;
+        this.black = init.black;
+        this.tc = init.tc;
+        this.startTs = init.startTs;
+        this.tourId = init.tourId || null;
+        this.cid = init.cid || null;
+        this.level = init.level || 0;
+        this.startFen = this.chess.fen();
+        this.clock = { w: init.tc, b: init.tc };
+        this.turnStart = init.startTs;
+    }
+
+    get timed(): boolean { return this.tc > 0; }
+    get turn(): Color { return this.chess.turnColor(); }
+
+    colorOf(addr: string): Color | null {
+        if (addr === this.white.addr) return 'w';
+        if (addr === this.black.addr) return 'b';
+        return null;
+    }
+
+    player(color: Color): PlayerRef { return color === 'w' ? this.white : this.black; }
+
+    /** Remaining clock time (ms) for a side at time `now`. */
+    remaining(color: Color, now: number): number {
+        if (!this.timed) return Infinity;
+        const running = !this.over && this.turn === color;
+        return this.clock[color] - (running ? Math.max(0, now - this.turnStart) : 0);
+    }
+
+    /** Clock values to publish right after `color` moves at `now`. */
+    clockAfterMove(color: Color, now: number): Clock {
+        const c = { ...this.clock };
+        if (this.timed) c[color] = Math.max(0, this.remaining(color, now));
+        return c;
+    }
+
+    /** Applies a UCI move. `at` is when the opponent's clock starts running. */
+    applyMove(uci: string, clock: Clock | null, at: number): PlyRecord | null {
+        if (this.over) return null;
+        const mv = this.chess.move(uci);
+        if (!mv) return null;
+        if (this.timed && clock) this.clock = { w: clock.w, b: clock.b };
+        this.turnStart = at;
+        this.drawOffer = null;
+        const rec: PlyRecord = {
+            uci: mv.uci, san: mv.san, from: mv.from, to: mv.to, color: mv.color,
+            captured: mv.captured, fen: this.chess.fen(), check: mv.san.endsWith('+') || mv.san.endsWith('#'),
+            clock: this.timed ? { ...this.clock } : null
+        };
+        this.plies.push(rec);
+        return rec;
+    }
+
+    /** Removes the last `n` plies (computer games only). */
+    takeBack(n: number): void {
+        const keep = this.plies.slice(0, Math.max(0, this.plies.length - n)).map((p) => p.uci);
+        this.chess.load(this.startFen);
+        this.plies = [];
+        this.over = false; this.result = null; this.reason = null; this.endTs = null;
+        for (const uci of keep) this.applyMove(uci, null, Date.now());
+    }
+
+    status(): Status { return this.chess.status(); }
+
+    end(result: GameResult, reason: string, now: number): boolean {
+        if (this.over) return false;
+        if (this.timed) {
+            const side = this.turn;
+            this.clock[side] = Math.max(0, this.remaining(side, now));
+        }
+        this.over = true;
+        this.result = result;
+        this.reason = reason;
+        this.endTs = now;
+        this.drawOffer = null;
+        return true;
+    }
+
+    /** Result when `color` runs out of time (draw if the opponent cannot mate). */
+    timeoutResult(color: Color): GameResult {
+        const winner = opposite(color);
+        if (!this.chess.hasMatingMaterial(winner)) return '1/2-1/2';
+        return winner === 'w' ? '1-0' : '0-1';
+    }
+
+    fenAt(ply: number): string {
+        if (ply <= 0) return this.startFen;
+        return this.plies[Math.min(ply, this.plies.length) - 1].fen;
+    }
+
+    /** Opponent pieces captured by `color` up to ply (exclusive end index). */
+    capturedBy(color: Color, upto = this.plies.length): Record<PieceType, number> {
+        const counts: Record<PieceType, number> = { p: 0, n: 0, b: 0, r: 0, q: 0, k: 0 };
+        for (const p of this.plies.slice(0, upto)) if (p.color === color && p.captured) counts[p.captured]++;
+        return counts;
+    }
+
+    pgn(): string {
+        const date = new Date(this.startTs);
+        const pad = (n: number): string => String(n).padStart(2, '0');
+        const headers: [string, string][] = [
+            ['Event', this.kind === 'tournament' ? 'Arena tournament' : this.kind === 'computer' ? 'Game vs computer' : 'Casual game'],
+            ['Site', 'webxdc'],
+            ['Date', `${date.getFullYear()}.${pad(date.getMonth() + 1)}.${pad(date.getDate())}`],
+            ['White', this.white.name],
+            ['Black', this.black.name],
+            ['Result', this.result || '*'],
+            ['TimeControl', this.timed ? `${this.tc / 1000}+0` : '-']
+        ];
+        if (this.reason) headers.push(['Termination', this.reason]);
+        let moves = '';
+        this.plies.forEach((p, i) => {
+            if (i % 2 === 0) moves += `${i / 2 + 1}. `;
+            moves += p.san + ' ';
+        });
+        return headers.map(([k, v]) => `[${k} "${v.replace(/"/g, "'")}"]`).join('\n') + '\n\n' + moves + (this.result || '*') + '\n';
+    }
+}

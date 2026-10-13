@@ -1,0 +1,32 @@
+{
+  "name": "chess-webxdc",
+  "version": "0.1.0+5",
+  "description": "Chess for webxdc: play the computer, challenge chat peers, or run a 60-minute arena tournament",
+  "keywords": [
+    "chess",
+    "webxdc"
+  ],
+  "license": "MIT",
+  "author": "th2tran",
+  "type": "module",
+  "scripts": {
+    "start": "npm run build:assets && webxdc-dev run .",
+    "test": "node --test 'test/*.test.ts'",
+    "typecheck": "tsc -p .",
+    "build:ts": "esbuild src/app.ts src/ai-worker.ts --bundle --format=iife --target=es2020 --minify --outdir=build --log-level=warning",
+    "build:css": "sass src/styles/main.scss build/style.css --no-source-map --style=compressed",
+    "build:assets": "npm run sync-version && npm run build:ts && npm run build:css",
+    "bump-build": "node -e \"const fs=require('fs');const rd=f=>JSON.parse(fs.readFileSync(f,'utf8'));const wr=(f,j)=>fs.writeFileSync(f,JSON.stringify(j,null,2)+String.fromCharCode(10));const p=rd('package.json');const m=/^(\\d+\\.\\d+\\.\\d+)(?:\\+(\\d+))?$/.exec(p.version);if(!m){console.error('Unsupported version: '+p.version);process.exit(1);}p.version=m[1]+'+'+((m[2]?+m[2]:0)+1);wr('package.json',p);if(fs.existsSync('package-lock.json')){const l=rd('package-lock.json');l.version=p.version;if(l.packages&&l.packages[''])l.packages[''].version=p.version;wr('package-lock.json',l);}console.log(p.version);\"",
+    "sync-version": "node -e \"const fs=require('fs');const v=require('./package.json').version.replace('+','.');fs.writeFileSync('version.js','window.APP_VERSION = '+JSON.stringify(v)+';'+String.fromCharCode(10));\"",
+    "build": "npm run typecheck && npm test && npm run bump-build && npm run build:assets && npm run build:xdc",
+    "build:xdc": "mkdir -p dist && bestzip dist/chess-$(node -p \"require('./package.json').version.replace('+','.')\").xdc manifest.toml index.html version.js icon.png build/app.js build/ai-worker.js build/style.css"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "@webxdc/webxdc-dev": "^0.21.0",
+    "bestzip": "^4.0.3",
+    "esbuild": "^0.28.2",
+    "sass": "^1.105.1",
+    "typescript": "^7.0.2"
+  }
+}

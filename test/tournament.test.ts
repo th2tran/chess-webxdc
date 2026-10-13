@@ -1,0 +1,82 @@
+import test from 'node:test';
+import assert from 'node:assert';
+import * as T from '../src/tournament.ts';
+
+function setup(n: number): T.TournamentState {
+    const t = T.create({ id: 't1', host: 'a@x', hostName: 'A', now: 0 });
+    for (let i = 1; i < n; i++) T.addPlayer(t, `${'abcdef'[i]}@x`, 'abcdef'[i].toUpperCase(), 0);
+    return t;
+}
+
+test('create/join/withdraw bump revision and roster', () => {
+    const t = setup(3);
+    assert.deepStrictEqual(Object.keys(t.players).sort(), ['a@x', 'b@x', 'c@x']);
+    const rev = t.rev;
+    assert.strictEqual(T.addPlayer(t, 'b@x', 'B', 1), false, 'duplicate join is a no-op');
+    assert.strictEqual(t.rev, rev);
+    assert.ok(T.withdraw(t, 'c@x'));
+    assert.ok(t.rev > rev);
+    assert.ok(T.addPlayer(t, 'c@x', 'C', 2), 'rejoin after withdraw');
+    assert.strictEqual(t.players['c@x'].withdrawn, false);
+});
+
+test('pairing pairs idle online players, balances colours and avoids immediate rematches', () => {
+    const t = setup(4);
+    const online = new Set(Object.keys(t.players));
+    const pairs = T.pairings(t, 10000, online);
+    assert.strictEqual(pairs.length, 2);
+    assert.strictEqual(new Set(pairs.flatMap((p) => [p.white, p.black])).size, 4);
+    assert.deepStrictEqual(T.pairings(t, 10000, new Set(['a@x'])), [], 'offline players are not paired');
+
+    pairs.forEach((p, i) => T.startGame(t, `g${i}`, p.white, p.black, 10000));
+    assert.deepStrictEqual(T.pairings(t, 11000, online), [], 'busy players are not paired');
+    T.applyResult(t, 'g0', '1-0', 'checkmate', 20000);
+    assert.deepStrictEqual(T.pairings(t, 20000 + T.REST_MS, online), [], 'no immediate rematch while others play');
+    T.applyResult(t, 'g1', '0-1', 'resign', 20000);
+    const next = T.pairings(t, 20000 + T.REST_MS, online);
+    assert.strictEqual(next.length, 2);
+    for (const p of next) {
+        assert.notStrictEqual(t.players[p.white].lastOpp, p.black, 'new opponent');
+        assert.ok(t.players[p.white].whites <= t.players[p.white].blacks, 'previous black gets white');
+    }
+});
+
+test('arena scoring with streak bonus and standings', () => {
+    const t = setup(2);
+    for (let i = 0; i < 3; i++) {
+        T.startGame(t, `g${i}`, 'a@x', 'b@x', i);
+        T.applyResult(t, `g${i}`, '1-0', 'checkmate', i);
+    }
+    assert.strictEqual(t.players['a@x'].score, 2 + 2 + 4);
+    assert.strictEqual(T.applyResult(t, 'g0', '0-1', 'x', 9), false, 'result applied once');
+    T.startGame(t, 'g3', 'b@x', 'a@x', 10);
+    T.applyResult(t, 'g3', '1/2-1/2', 'stalemate', 10);
+    assert.strictEqual(t.players['a@x'].score, 8 + 2, 'draw on fire is doubled');
+    const st = T.standings(t);
+    assert.strictEqual(st[0].addr, 'a@x');
+    assert.strictEqual(st[0].rank, 1);
+    assert.strictEqual(st[1].score, 1);
+});
+
+test('lifecycle: running -> finishing -> finished, stale games adjudicated', () => {
+    const t = setup(2);
+    T.startGame(t, 'g', 'a@x', 'b@x', 1000);
+    const end = T.endTs(t);
+    assert.ok(T.updateStatus(t, end));
+    assert.strictEqual(t.status, 'finishing');
+    assert.deepStrictEqual(T.pairings(t, end, null), []);
+    assert.ok(T.adjudicateStale(t, 1000 + T.MAX_GAME_MS + 1));
+    T.updateStatus(t, end + 1);
+    assert.strictEqual(t.status, 'finished');
+});
+
+test('pickNewer keeps the highest revision and converges on one tournament', () => {
+    const a = setup(2), b = T.clone(a);
+    T.addPlayer(b, 'z@x', 'Z', 5);
+    assert.strictEqual(T.pickNewer(a, b), b);
+    assert.strictEqual(T.pickNewer(b, a), b);
+    assert.strictEqual(T.pickNewer(null, a), a);
+    const later = T.create({ id: 't2', host: 'b@x', hostName: 'B', now: 100 });
+    assert.strictEqual(T.pickNewer(a, later), a, 'earliest active tournament wins');
+    assert.strictEqual(T.pickNewer(later, a), a);
+});

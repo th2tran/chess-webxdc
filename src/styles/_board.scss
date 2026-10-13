@@ -1,0 +1,154 @@
+@use 'variables' as *;
+
+.board-wrap {
+    position: relative;
+    width: var(--board);
+    height: var(--board);
+    box-shadow: 0 3px 10px rgba(0, 0, 0, .5);
+
+    &.history::after {
+        content: '';
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        box-shadow: inset 0 0 0 3px rgba(54, 146, 231, .65);
+        z-index: 6;
+    }
+}
+
+.board {
+    position: relative;
+    display: grid;
+    grid-template-columns: repeat(8, 1fr);
+    grid-template-rows: repeat(8, 1fr);
+    width: 100%;
+    height: 100%;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+.sq {
+    position: relative;
+    &.light { background: $light-sq; }
+    &.dark { background: $dark-sq; }
+
+    &::before, &::after {
+        content: '';
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+    }
+    &::before { z-index: 1; }
+    &::after { z-index: 3; }
+
+    &.last-move::before { background: rgba(155, 199, 0, .41); }
+    &.selected::before { background: rgba(20, 85, 30, .5); }
+    &.check::before {
+        background: radial-gradient(ellipse at center, rgba(255, 0, 0, 1) 0%, rgba(231, 0, 0, 1) 25%, rgba(169, 0, 0, 0) 89%, rgba(158, 0, 0, 0) 100%);
+    }
+    &.dest::after { background: radial-gradient(rgba(20, 85, 30, .5) 19%, rgba(0, 0, 0, 0) 20%); }
+    &.dest.occupied::after { background: radial-gradient(transparent 0%, transparent 79%, rgba(20, 85, 0, .3) 80%); }
+    &.dest:hover::after, &.drag-over::after { background: rgba(20, 85, 30, .3); }
+    &.movable { cursor: pointer; }
+    &.dest { cursor: pointer; }
+
+    &.mate .piece::after {
+        content: '#';
+        position: absolute;
+        top: 2%;
+        right: 2%;
+        width: 34%;
+        height: 34%;
+        border-radius: 50%;
+        background: $bad;
+        color: #fff;
+        font-weight: 700;
+        font-size: calc(var(--board) / 8 * .22);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, .5);
+    }
+}
+
+.coord {
+    position: absolute;
+    z-index: 4;
+    font-size: calc(var(--board) / 8 * .2);
+    font-weight: 600;
+    line-height: 1;
+    pointer-events: none;
+    &.rank { top: 3%; right: 4%; }
+    &.file { bottom: 3%; left: 5%; }
+    .light > & { color: $dark-sq; }
+    .dark > & { color: $light-sq; }
+}
+
+.piece {
+    position: absolute;
+    inset: 0;
+    z-index: 2;
+    background-size: cover;
+    background-repeat: no-repeat;
+    pointer-events: none;
+    &.dragging { opacity: .3; }
+    &.ghost {
+        position: fixed;
+        inset: auto;
+        left: 0;
+        top: 0;
+        z-index: 100;
+        will-change: transform;
+        filter: drop-shadow(0 6px 6px rgba(0, 0, 0, .4));
+    }
+}
+
+.promotion {
+    position: absolute;
+    inset: 0;
+    z-index: 10;
+    background: rgba(250, 250, 250, .7);
+}
+
+.promo-choice {
+    position: absolute;
+    width: 12.5%;
+    height: 12.5%;
+    border: 0;
+    border-radius: 50%;
+    background-color: #b0b0b0;
+    background-size: 80%;
+    background-position: center;
+    background-repeat: no-repeat;
+    box-shadow: inset 0 0 25px 3px #808080;
+    transition: all .15s;
+    &:hover {
+        border-radius: 0;
+        background-color: $fire;
+        box-shadow: inset 0 0 48px 8px #d64f00;
+        background-size: 100%;
+    }
+}
+
+.crosstable {
+    width: var(--board);
+    background: $card;
+    border-radius: $radius;
+    box-shadow: $shadow;
+    overflow-x: auto;
+    table { border-collapse: collapse; margin-left: auto; }
+    td {
+        min-width: 30px;
+        padding: 5px 4px;
+        text-align: center;
+        border-left: 1px solid $border;
+        font-weight: 600;
+        &.p2 { color: $good; }
+        &.p0 { color: $bad; }
+        &.p1 { color: $dim; }
+    }
+    tr + tr td { border-top: 1px solid $border; }
+    .ct-name { text-align: left; padding: 5px 10px; color: $text; font-weight: 400; white-space: nowrap; max-width: 140px; overflow: hidden; text-overflow: ellipsis; }
+    .ct-total { min-width: 40px; color: $text-strong; font-size: 15px; }
+}
