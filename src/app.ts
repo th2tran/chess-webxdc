@@ -1,6 +1,6 @@
 /* Main application: game modes, peer presence, challenges, tournaments and rendering. */
 import { Chess, type Color, type GameResult, type PieceType } from './engine.ts';
-import { bestMove, LEVEL_NAMES } from './ai.ts';
+import { fallbackMove, LEVEL_NAMES } from './ai.ts';
 import { BoardView, type BoardState } from './board.ts';
 import { GameRecord, NETWORK_TC_MS, FLAG_GRACE_MS, describeResult, opposite } from './game.ts';
 import { Net, randomId, type Message, type MessageOf, type PeerStatus, type PlayerRef, type ReceiveContext } from './net.ts';
@@ -8,6 +8,7 @@ import * as T from './tournament.ts';
 import { pieceUrl } from './pieces.ts';
 import { $, esc, formatClock, formatDuration, loadJson, Modals, saveJson, Sounds, timeAgo, toast } from './ui.ts';
 import type { AiRequest, AiResponse } from './ai-worker.ts';
+import { canMove, canEndGame, canDeclineDraw, validClock, validSync, syncClock, pruneCompletedGames, MAX_PENDING_MOVES } from './protocol.ts';
 
 type Mode = 'computer' | 'network' | 'tournament';
 type Tab = 'peers' | 'chat' | 'standings';
@@ -48,6 +49,7 @@ interface SavedComputerGame {
 interface Prefs { muted: boolean; level: number; color: Color | 'random'; mode: Mode; }
 
 const CHALLENGE_TTL_MS = 60000;
+const SYNC_RETRY_MS = 5000;
 const AI_ADDR = 'computer@local';
 const STORAGE_PREFS = 'chess-xdc:prefs';
 const STORAGE_COMPUTER = 'chess-xdc:computer-game';
@@ -212,7 +214,7 @@ function onHello(msg: MessageOf<'hello'>, ctx: ReceiveContext): void {
 }
 
 function onPresence(msg: MessageOf<'presence'>, ctx: ReceiveContext): void {
-    if (ctx.local) return;
+    if (ctx.local || msg.from === me.addr) return;
     if (ctx.replay && now() - msg.ts > peerTimeout()) return;
     const p = touchPeer(msg.from, msg.name, ctx.replay ? msg.ts : now());
     p.status = msg.status;
@@ -237,6 +239,11 @@ function onChat(msg: MessageOf<'chat'>, ctx: ReceiveContext): void {
 // ---------------------------------------------------------------- challenges
 
 function onChallenge(msg: MessageOf<'challenge'>, ctx: ReceiveContext): void {
+    if (typeof msg.cid !== 'string' || typeof msg.to !== 'string' || msg.from === msg.to
+        || !['w', 'b', 'random'].includes(msg.color)) {
+        console.warn('chess: malformed challenge');
+        return;
+    }
     const toPeer = S.peers.get(msg.to);
     const c: Challenge = {
         cid: msg.cid, from: msg.from, fromName: msg.name, to: msg.to, toName: toPeer?.name || (msg.to === me.addr ? me.name : msg.to),
@@ -256,6 +263,7 @@ function onChallenge(msg: MessageOf<'challenge'>, ctx: ReceiveContext): void {
 function onChallengeCancel(msg: MessageOf<'challenge-cancel'>, ctx: ReceiveContext): void {
     const c = S.challenges.get(msg.cid);
     if (!c || c.state !== 'pending') return;
+    if (msg.from !== c.from) { console.warn('chess: unauthorized challenge cancellation', msg.cid); return; }
     c.state = 'cancelled';
     if (S.outgoing === c.cid) S.outgoing = null;
     modals.close(`challenge-in-${c.cid}`);
@@ -266,6 +274,7 @@ function onChallengeCancel(msg: MessageOf<'challenge-cancel'>, ctx: ReceiveConte
 function onChallengeDecline(msg: MessageOf<'challenge-decline'>, ctx: ReceiveContext): void {
     const c = S.challenges.get(msg.cid);
     if (!c || c.state !== 'pending') return;
+    if (msg.from !== c.to) { console.warn('chess: unauthorized challenge decline', msg.cid); return; }
     c.state = 'declined';
     if (S.outgoing === c.cid) S.outgoing = null;
     modals.close(`challenge-out-${c.cid}`);
@@ -379,6 +388,17 @@ function openChallengeDialog(peer: Peer): void {
 
 function onGameStart(msg: MessageOf<'gstart'>, ctx: ReceiveContext): void {
     if (S.games.has(msg.gameId)) return;
+    const challenge = msg.cid ? S.challenges.get(msg.cid) : null;
+    const tour = S.tour;
+    const validPlayers = msg.white && msg.black && typeof msg.white.addr === 'string' && typeof msg.black.addr === 'string'
+        && typeof msg.white.name === 'string' && typeof msg.black.name === 'string' && msg.white.addr !== msg.black.addr;
+    const validStart = validPlayers && msg.tc === NETWORK_TC_MS && (msg.tourId
+        ? tour?.id === msg.tourId && tour.host === msg.from && !!tour.players[msg.white.addr] && !!tour.players[msg.black.addr]
+        : !!challenge && challenge.state !== 'accepted' && msg.from === challenge.to
+            && [msg.white.addr, msg.black.addr].includes(challenge.from)
+            && [msg.white.addr, msg.black.addr].includes(challenge.to)
+            && (challenge.color === 'random' || (challenge.color === 'w' ? msg.white.addr : msg.black.addr) === challenge.from));
+    if (!validStart) { console.warn('chess: unauthorized game start', msg.gameId); return; }
     const startTs = ctx.replay ? msg.ts : now();
     const g = new GameRecord({
         id: msg.gameId, kind: msg.tourId ? 'tournament' : 'network', white: msg.white, black: msg.black,
@@ -424,31 +444,44 @@ function enterGame(g: GameRecord): void {
 }
 
 function requestSync(g: GameRecord): void {
-    if (now() - g.lastSyncRequest < 3000 || net.replaying) return;
+    if (now() - g.lastSyncRequest < SYNC_RETRY_MS || net.replaying) return;
     g.lastSyncRequest = now();
-    net.send({ type: 'gsync-req', gameId: g.id, have: g.plies.length });
+    net.send({ type: 'gsync-req', gameId: g.id, have: g.plies.length }, { persist: true });
 }
 
 function onMove(msg: MessageOf<'move'>, ctx: ReceiveContext): void {
     const g = S.games.get(msg.gameId);
     if (!g || g.over) return;
+    if (!canMove(g, msg.from, msg.ply) || !validClock(msg.clock) || typeof msg.uci !== 'string') {
+        console.warn('chess: unauthorized or malformed move', msg.gameId, msg.ply);
+        return;
+    }
     if (msg.ply < g.plies.length) return;
     const at = ctx.replay ? msg.ts : now();
     if (msg.ply > g.plies.length) {
-        g.pending.set(msg.ply, { uci: msg.uci, clock: msg.clock, at });
+        if (msg.ply - g.plies.length > MAX_PENDING_MOVES || g.pending.size >= MAX_PENDING_MOVES) {
+            console.warn('chess: excessive move gap', g.id, msg.ply);
+            if (!ctx.replay) requestSync(g);
+            return;
+        }
+        g.pending.set(msg.ply, { from: msg.from, uci: msg.uci, clock: msg.clock, at });
         if (!ctx.replay) requestSync(g);
+        if (!ctx.replay && g === S.game) toast('Waiting for missing moves. Requesting game sync.', 'warn');
         return;
     }
     if (!applyNetworkMove(g, msg.uci, msg.clock, at, ctx)) return;
     while (g.pending.has(g.plies.length) && !g.over) {
         const p = g.pending.get(g.plies.length)!;
         g.pending.delete(g.plies.length);
-        if (!applyNetworkMove(g, p.uci, p.clock, ctx.replay ? p.at : now(), ctx)) break;
+        if (!canMove(g, p.from, g.plies.length) || !applyNetworkMove(g, p.uci, p.clock, ctx.replay ? p.at : now(), ctx)) break;
     }
+    applyPendingEnd(g);
 }
 
-function applyNetworkMove(g: GameRecord, uci: string, clock: { w: number; b: number }, at: number, ctx: ReceiveContext): boolean {
-    const rec = g.applyMove(uci, clock, at);
+function applyNetworkMove(
+    g: GameRecord, uci: string, clock: { w: number; b: number }, at: number, ctx: ReceiveContext, historical = ctx.replay
+): boolean {
+    const rec = g.applyMove(uci, clock, at, historical);
     if (!rec) {
         console.warn('chess: rejected move', g.id, uci);
         if (!ctx.replay) requestSync(g);
@@ -466,9 +499,29 @@ function applyNetworkMove(g: GameRecord, uci: string, clock: { w: number; b: num
 
 function onGameEnd(msg: MessageOf<'gend'>, ctx: ReceiveContext): void {
     const g = S.games.get(msg.gameId);
-    if (g) finishGame(g, msg.result, msg.reason, { announce: false, at: ctx.replay ? msg.ts : now(), replay: ctx.replay });
-    // The tournament host records results even for games it never saw start.
-    hostRecordResult(msg.gameId, msg.result, msg.reason);
+    if (!g || g.over) return;
+    const at = ctx.replay ? msg.ts : now();
+    if (!canEndGame(g, msg.from, msg.result, msg.reason, at)) {
+        console.warn('chess: rejected game result', msg.gameId, msg.reason);
+        if (g.pending.size && g.colorOf(msg.from) && ['agreement', 'time out', 'checkmate', 'stalemate', 'insufficient material',
+            'threefold repetition', '50-move rule'].includes(msg.reason)) {
+            g.pendingEnd = { from: msg.from, result: msg.result, reason: msg.reason, at, replay: ctx.replay };
+            if (!ctx.replay) requestSync(g);
+        }
+        return;
+    }
+    finishGame(g, msg.result, msg.reason, { announce: false, at, replay: ctx.replay });
+}
+
+function applyPendingEnd(g: GameRecord): void {
+    const end = g.pendingEnd;
+    if (!end || g.over) return;
+    if (!canEndGame(g, end.from, end.result, end.reason, end.at)) {
+        if (!g.pending.size) g.pendingEnd = null;
+        return;
+    }
+    g.pendingEnd = null;
+    finishGame(g, end.result, end.reason, { announce: false, at: end.at, replay: end.replay });
 }
 
 interface FinishOptions { announce: boolean; at?: number; replay?: boolean; }
@@ -500,8 +553,10 @@ function finishGame(g: GameRecord, result: GameResult, reason: string, opts: Fin
 
 function onDrawOffer(msg: MessageOf<'draw-offer'>, ctx: ReceiveContext): void {
     const g = S.games.get(msg.gameId);
-    if (!g || g.over || !g.colorOf(msg.from)) return;
+    if (!g || g.over) return;
+    if (!g.colorOf(msg.from)) { console.warn('chess: unauthorized draw offer', g.id); return; }
     g.drawOffer = msg.from;
+    applyPendingEnd(g);
     if (!ctx.local && !ctx.replay && g === S.game && g.colorOf(me.addr)) {
         sounds.play('notify');
         toast(`${msg.name} offers a draw.`);
@@ -512,6 +567,7 @@ function onDrawOffer(msg: MessageOf<'draw-offer'>, ctx: ReceiveContext): void {
 function onDrawDecline(msg: MessageOf<'draw-decline'>, ctx: ReceiveContext): void {
     const g = S.games.get(msg.gameId);
     if (!g || g.over) return;
+    if (!canDeclineDraw(g, msg.from)) { console.warn('chess: unauthorized draw decline', g.id); return; }
     g.drawOffer = null;
     if (!ctx.local && !ctx.replay && g === S.game) toast(`${msg.name} declined the draw offer.`);
     scheduleRender();
@@ -530,13 +586,27 @@ function onSyncRequest(msg: MessageOf<'gsync-req'>, ctx: ReceiveContext): void {
 function onSync(msg: MessageOf<'gsync'>, ctx: ReceiveContext): void {
     if (ctx.local) return;
     const g = S.games.get(msg.gameId);
-    if (!g) return;
+    if (!g || g.over) return;
+    if (!validSync(g, msg, me.addr)) { console.warn('chess: rejected game sync', g.id); return; }
     const at = ctx.replay ? msg.ts : now();
     for (let i = g.plies.length; i < msg.moves.length && !g.over; i++) {
-        if (!applyNetworkMove(g, msg.moves[i].uci, msg.moves[i].clock, at, { ...ctx, local: false })) break;
+        const clock = syncClock(g, i, msg.moves[i].clock, me.addr);
+        if (!applyNetworkMove(g, msg.moves[i].uci, clock, at, { ...ctx, local: false }, true)) return;
+        g.pending.delete(i);
     }
-    g.pending.clear();
-    if (msg.result && !g.over) finishGame(g, msg.result, msg.reason || '', { announce: false, at, replay: ctx.replay });
+    for (const ply of g.pending.keys()) if (ply < g.plies.length) g.pending.delete(ply);
+    while (g.pending.has(g.plies.length) && !g.over) {
+        const p = g.pending.get(g.plies.length)!;
+        g.pending.delete(g.plies.length);
+        if (!canMove(g, p.from, g.plies.length) || !applyNetworkMove(g, p.uci, p.clock, at, ctx, true)) break;
+    }
+    if (msg.result && !g.over) {
+        if (canEndGame(g, msg.from, msg.result, msg.reason || '', at)) {
+            finishGame(g, msg.result, msg.reason || '', { announce: false, at, replay: ctx.replay });
+        } else console.warn('chess: rejected sync result', g.id);
+    }
+    applyPendingEnd(g);
+    scheduleRender();
 }
 
 // ---------------------------------------------------------------- tournaments
@@ -559,16 +629,27 @@ function hostRecordResult(gameId: string, result: GameResult, reason: string): v
     }
 }
 
-function isValidTour(t: unknown): t is T.TournamentState {
-    const x = t as T.TournamentState;
-    return !!x && typeof x.id === 'string' && typeof x.host === 'string' && typeof x.rev === 'number'
-        && !!x.players && typeof x.players === 'object' && !!x.games && typeof x.games === 'object';
+function reconcileTournamentGames(t: T.TournamentState, replay: boolean): void {
+    for (const result of Object.values(t.games)) {
+        const g = S.games.get(result.id);
+        if (!g || g.over || g.tourId !== t.id || !result.result
+            || g.white.addr !== result.white || g.black.addr !== result.black) continue;
+        finishGame(g, result.result, result.reason || '', {
+            announce: false, at: replay ? result.endTs ?? now() : now(), replay
+        });
+    }
 }
 
 function onTournamentState(msg: MessageOf<'tstate'>, ctx: ReceiveContext): void {
-    if (!isValidTour(msg.tour)) return;
+    if (!T.isValidState(msg.tour)) { console.warn('chess: malformed tournament state'); return; }
     const prev = S.tour;
     const incoming = msg.tour;
+    const successor = prev?.id === incoming.id && prev.host !== incoming.host;
+    if (!T.canPublishState(prev, incoming, msg.from, ctx.replay ? null : onlineSet())
+        || (successor && !ctx.replay && now() - appStart <= peerTimeout() + 5000)) {
+        console.warn('chess: unauthorized tournament state', incoming.id, msg.from);
+        return;
+    }
     if (T.pickNewer(prev, incoming) !== incoming || prev === incoming) {
         // Help a lagging peer catch up with our newer copy.
         if (!ctx.replay && !ctx.local && prev && prev.id === incoming.id && prev.host === me.addr
@@ -577,6 +658,7 @@ function onTournamentState(msg: MessageOf<'tstate'>, ctx: ReceiveContext): void 
     }
     S.tour = T.clone(incoming);
     const t = S.tour;
+    reconcileTournamentGames(t, ctx.replay);
     if (t.players[me.addr] && S.joiningTour === t.id) S.joiningTour = null;
     if (!ctx.replay && !ctx.local) {
         const isNew = !prev || prev.id !== t.id;
@@ -708,6 +790,7 @@ function tournamentLoop(): void {
         let changed = T.updateStatus(t, ts);
         changed = T.adjudicateStale(t, ts) || changed;
         changed = T.updateStatus(t, ts) || changed;
+        reconcileTournamentGames(t, false);
         for (const pair of T.pairings(t, ts, onlineSet())) {
             const gameId = randomId('g');
             T.startGame(t, gameId, pair.white, pair.black, ts);
@@ -752,8 +835,17 @@ let worker: Worker | null = null;
 try {
     worker = new Worker('assets/ai-worker.js');
     worker.onmessage = (e: MessageEvent<AiResponse>) => onAiResponse(e.data);
-    worker.onerror = () => { worker = null; };
-} catch {
+    worker.onerror = (event) => {
+        console.warn('chess: AI worker failed', event.message);
+        worker?.terminate();
+        worker = null;
+        for (const [id, pending] of pendingAi) {
+            pendingAi.delete(id);
+            runAiFallback(pending.req, pending.deliver);
+        }
+    };
+} catch (err) {
+    console.warn('chess: AI worker unavailable', err);
     worker = null;
 }
 
@@ -806,18 +898,40 @@ function maybeAiMove(): void {
         setTimeout(() => onAiResponse({ id, uci }), wait);
     };
     if (worker) {
-        pendingAi.set(id, { started, deliver });
-        worker.postMessage(req);
+        pendingAi.set(id, { req, deliver });
+        try {
+            worker.postMessage(req);
+        } catch (err) {
+            console.warn('chess: AI worker send failed', err);
+            pendingAi.delete(id);
+            worker.terminate();
+            worker = null;
+            runAiFallback(req, deliver);
+        }
     } else {
-        setTimeout(() => {
-            const c = new Chess(req.startFen);
-            for (const m of req.moves) c.move(m);
-            deliver(bestMove(c, req.level)?.uci || null);
-        }, 30);
+        runAiFallback(req, deliver);
     }
 }
 
-const pendingAi = new Map<number, { started: number; deliver: (uci: string | null) => void }>();
+let fallbackNoticeShown = false;
+function runAiFallback(req: AiRequest, deliver: (uci: string | null) => void): void {
+    if (!fallbackNoticeShown) {
+        fallbackNoticeShown = true;
+        toast('AI worker unavailable. Using a reduced-strength computer to keep the interface responsive.', 'warn', 5000);
+    }
+    const c = new Chess(req.startFen);
+    for (const m of req.moves) c.move(m);
+    void fallbackMove(c).then(deliver).catch((err: unknown) => {
+        console.error('chess: AI fallback failed', err);
+        if (req.id === S.aiRequestId) {
+            S.aiThinking = false;
+            toast('Computer move failed. Start a new computer game to retry.', 'warn');
+            scheduleRender();
+        }
+    });
+}
+
+const pendingAi = new Map<number, { req: AiRequest; deliver: (uci: string | null) => void }>();
 
 function onAiResponse(res: AiResponse): void {
     const pending = pendingAi.get(res.id);
@@ -886,6 +1000,7 @@ function userMove(from: string, to: string, promotion: PieceType | null): void {
     const g = S.game;
     const color = myColorIn(g);
     if (!g || !color || g.over || g.turn !== color || S.viewPly !== null) return;
+    if (g.pending.size) { toast('Waiting for missing moves. Requesting game sync.', 'warn'); requestSync(g); return; }
     const legal = g.chess.movesFrom(from).find((m) => m.to === to && (!m.promotion || m.promotion === (promotion || 'q')));
     if (!legal) return;
     if (g.kind === 'computer') {
@@ -1417,6 +1532,7 @@ function tick(): void {
     const ts = now();
     for (const g of S.games.values()) {
         if (g.over || !g.timed || net.replaying) continue;
+        if (g.pending.size) continue;
         const mine = g.colorOf(me.addr);
         if (!mine) continue;
         const side = g.turn;
@@ -1436,6 +1552,21 @@ function tick(): void {
 function slowTick(): void {
     sendPresence(false);
     tournamentLoop();
+    if (!net.replaying) {
+        for (const g of S.games.values()) if (!g.over && (g.pending.size || g.pendingEnd)) requestSync(g);
+        pruneCompletedGames(S.games, S.game);
+        for (const [addr, peer] of S.peers) {
+            if (now() - peer.lastSeen >= peerTimeout()) S.peers.delete(addr);
+        }
+        for (const [cid, c] of S.challenges) {
+            // Keep terminal challenges briefly so late acceptances can still be aborted.
+            if (now() - c.ts <= CHALLENGE_TTL_MS * 2) continue;
+            S.challenges.delete(cid);
+            if (S.outgoing === cid) S.outgoing = null;
+            modals.close(`challenge-in-${cid}`);
+            modals.close(`challenge-out-${cid}`);
+        }
+    }
     // Refresh peers list as entries go stale.
     const count = onlinePeers().length;
     if (String(count || '') !== $('#peer-count').textContent) scheduleRender();

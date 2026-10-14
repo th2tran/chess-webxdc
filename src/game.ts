@@ -65,7 +65,8 @@ export class GameRecord {
     /** Address of the player currently offering a draw. */
     drawOffer: string | null = null;
     /** Out-of-order moves waiting for missing plies. */
-    pending = new Map<number, { uci: string; clock: Clock; at: number }>();
+    pending = new Map<number, { from: string; uci: string; clock: Clock; at: number }>();
+    pendingEnd: { from: string; result: GameResult; reason: string; at: number; replay: boolean } | null = null;
     lastSyncRequest = 0;
 
     constructor(init: GameInit) {
@@ -109,12 +110,19 @@ export class GameRecord {
     }
 
     /** Applies a UCI move. `at` is when the opponent's clock starts running. */
-    applyMove(uci: string, clock: Clock | null, at: number): PlyRecord | null {
+    applyMove(uci: string, clock: Clock | null, at: number, historical = false): PlyRecord | null {
         if (this.over) return null;
+        const color = this.turn;
+        if (this.timed && clock && (!Number.isFinite(clock.w) || !Number.isFinite(clock.b) || clock.w < 0 || clock.b < 0)) return null;
         const mv = this.chess.move(uci);
         if (!mv) return null;
-        if (this.timed && clock) this.clock = { w: clock.w, b: clock.b };
-        this.turnStart = at;
+        if (this.timed) {
+            // Live clocks use local elapsed time; replay only restores the mover's bounded clock.
+            this.clock[color] = historical && clock
+                ? Math.min(this.clock[color], clock[color])
+                : Math.max(0, this.clock[color] - Math.max(0, at - this.turnStart));
+        }
+        this.turnStart = historical ? Math.min(at, Date.now()) : at;
         this.drawOffer = null;
         const rec: PlyRecord = {
             uci: mv.uci, san: mv.san, from: mv.from, to: mv.to, color: mv.color,
@@ -147,6 +155,8 @@ export class GameRecord {
         this.reason = reason;
         this.endTs = now;
         this.drawOffer = null;
+        this.pending.clear();
+        this.pendingEnd = null;
         return true;
     }
 

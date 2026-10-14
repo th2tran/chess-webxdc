@@ -6,7 +6,7 @@ A chess game for [webxdc](https://webxdc.org) messengers such as Vector Chat, wi
 
 ## Play modes
 
-- **vs Computer** – five strength levels (Beginner → Expert). The engine runs in a Web Worker. Games are saved locally and support takeback.
+- **vs Computer** – five strength levels (Beginner → Expert). The engine runs in a Web Worker. If workers are unavailable, a reduced-strength search yields between candidates to keep the interface responsive, with a warning shown in the app. Games are saved locally and support takeback.
 - **Network · 2 players** – the **Peers** tab lists everyone who currently has the app open in the chat. Click a peer to challenge them (choose White, Black or random). If they accept, both of you enter a 5+0 game (5 minutes per side). Draw offers, resignation, rematch and spectating ("Watch") are supported.
 - **Network · Tournament** – any peer that is not in a game or tournament can start a 60-minute arena tournament. Connected peers get an invitation; those who accept are added to the roster, which is kept in sync on every device (see **Standings**). Games are 5+0 and players are paired automatically after each game (win 2 points, draw 1, doubled after two wins in a row 🔥). No new games start after 60 minutes; the tournament ends once running games finish.
 
@@ -15,7 +15,11 @@ A chess game for [webxdc](https://webxdc.org) messengers such as Vector Chat, wi
 - Messages go over the webxdc realtime channel (`joinRealtimeChannel`) for presence and fast delivery, and important events (challenges, game starts, moves, results, tournament state) are also sent with `sendUpdate` so they survive restarts and reach peers without realtime support.
 - When the app is reopened, it replays the stored updates and resumes any unfinished game.
 - The tournament creator's device coordinates the tournament: it pairs players, records results and broadcasts the roster/standings. If it goes offline, the online participant with the lowest address takes over.
-- Clocks: each move carries both players' remaining time. A player who runs out of time loses (or draws if the opponent cannot mate). If the opponent's device goes silent, the other side claims the win on time after a short grace period.
+- Clocks: live moves deduct locally observed elapsed time from the mover only; a received clock cannot overwrite the other player's time. Historical replay and sync restore only bounded, non-increasing mover snapshots. Network delays can cause small clock differences between devices. A player who runs out of time loses (or draws if the opponent cannot mate). If the opponent's device goes silent, the other side claims the win on time after a short grace period.
+- Missing moves are buffered with a bounded gap, and sync requests are retried and persisted for offline delivery. Sync histories must match the known prefix and contain legal moves; a remote sync cannot invent this device's own moves. Play and timeout adjudication wait while a known move gap is unresolved. Recovery still requires a player with the missing history to reconnect; the app cannot reconstruct moves nobody can supply.
+- Only the appropriate player can send a move, resignation, or draw response. Game starts must match a challenge or come from the tournament host. Tournament state must come from its declared host; live host changes must match the lowest-addressed online, non-withdrawn participant when the previous host is offline. Historical replay checks successor membership, but cannot reconstruct past realtime presence.
+- **Trust model:** webxdc payload addresses are self-declared, not authenticated sender identities. These checks prevent spectators acting under their own addresses, but cannot prevent address impersonation, a dishonest tournament host, or forged historical timing. Play with trusted chat participants; this is not a cheat-proof competition protocol.
+- The tab retains the latest 100 completed game records, plus the displayed game and all unfinished games. Older records are no longer available in the in-app crosstable or for PGN export. Expired challenges and silently disconnected peers are also removed from memory; persisted messenger history is unaffected.
 
 ## Development
 
@@ -29,7 +33,7 @@ npm run typecheck  # tsc
 npm run build      # typecheck + tests + bump build number + bundle + package dist/chess-<version>.xdc
 ```
 
-`npm run build` increments the build number in `package.json`/`package-lock.json` and writes it to `version.js`.
+`npm run build` increments the build number in `package.json`/`package-lock.json` and synchronizes `version.js` and `manifest.toml`. Generated JavaScript and CSS go in `assets/`; the packaged archive goes in `dist/`.
 
 ## Credits
 

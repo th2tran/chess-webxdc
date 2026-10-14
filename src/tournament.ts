@@ -206,4 +206,45 @@ export function pickNewer(local: TournamentState | null, incoming: TournamentSta
 
 export function isActive(t: TournamentState | null): boolean { return !!t && t.status !== 'finished'; }
 
+export function isValidState(t: unknown): t is TournamentState {
+    const x = t as TournamentState;
+    return !!x && typeof x.id === 'string' && typeof x.host === 'string' && typeof x.createdBy === 'string'
+        && typeof x.name === 'string' && Number.isSafeInteger(x.rev) && x.rev >= 1
+        && Number.isFinite(x.startTs) && Number.isFinite(x.durationMs) && x.durationMs > 0
+        && ['running', 'finishing', 'finished'].includes(x.status)
+        && !!x.players && typeof x.players === 'object' && !Array.isArray(x.players)
+        && !!x.games && typeof x.games === 'object' && !Array.isArray(x.games)
+        && Object.prototype.hasOwnProperty.call(x.players, x.host)
+        && Object.prototype.hasOwnProperty.call(x.players, x.createdBy)
+        && Object.entries(x.players).every(([addr, p]) => !!p && p.addr === addr && typeof p.name === 'string'
+            && typeof p.withdrawn === 'boolean' && Array.isArray(p.results) && p.results.every((r) => ['W', 'D', 'L'].includes(r))
+            && Number.isFinite(p.joinedTs) && Number.isFinite(p.lastFreeTs)
+            && (p.currentGame === null || typeof p.currentGame === 'string') && (p.lastOpp === null || typeof p.lastOpp === 'string')
+            && [p.score, p.wins, p.draws, p.losses, p.streak, p.whites, p.blacks].every((n) => Number.isSafeInteger(n) && n >= 0))
+        && Object.entries(x.games).every(([id, g]) => !!g && g.id === id
+            && Object.prototype.hasOwnProperty.call(x.players, g.white) && Object.prototype.hasOwnProperty.call(x.players, g.black)
+            && g.white !== g.black && [null, '1-0', '0-1', '1/2-1/2'].includes(g.result)
+            && (g.reason === null || typeof g.reason === 'string') && Number.isFinite(g.startTs)
+            && (g.endTs === null || Number.isFinite(g.endTs)));
+}
+
+/** Payload identities are self-declared; this checks authority, not authentication. */
+export function canPublishState(
+    local: TournamentState | null, incoming: TournamentState, from: string, online: Set<string> | null
+): boolean {
+    if (from !== incoming.host) return false;
+    if (!local || local.id !== incoming.id) return true;
+    if (incoming.createdBy !== local.createdBy || incoming.startTs !== local.startTs || incoming.durationMs !== local.durationMs) return false;
+    if (incoming.host === local.host) return true;
+    if (!isActive(local) || incoming.rev <= local.rev) return false;
+    const candidate = Object.prototype.hasOwnProperty.call(local.players, from) ? local.players[from] : null;
+    if (!candidate || candidate.withdrawn) return false;
+    // Historical updates cannot reconstruct realtime presence, but the successor must be an existing member.
+    if (!online) return true;
+    if (online.has(local.host)) return false;
+    const candidates = Object.values(local.players).filter((p) => !p.withdrawn && online.has(p.addr))
+        .map((p) => p.addr).sort();
+    return candidates[0] === from;
+}
+
 export function clone<T>(t: T): T { return JSON.parse(JSON.stringify(t)) as T; }

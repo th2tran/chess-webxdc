@@ -80,3 +80,47 @@ test('pickNewer keeps the highest revision and converges on one tournament', () 
     assert.strictEqual(T.pickNewer(a, later), a, 'earliest active tournament wins');
     assert.strictEqual(T.pickNewer(later, a), a);
 });
+
+test('only the host can publish state, regardless of revision', () => {
+    const t = setup(3);
+    const incoming = T.clone(t);
+    incoming.rev += 1000;
+    assert.equal(T.canPublishState(t, incoming, 'c@x', new Set(['a@x', 'c@x'])), false);
+    assert.equal(T.canPublishState(t, incoming, 'a@x', new Set(['a@x', 'c@x'])), true);
+    assert.equal(T.canPublishState(null, incoming, 'c@x', null), false);
+    incoming.durationMs++;
+    assert.equal(T.canPublishState(t, incoming, 'a@x', null), false);
+});
+
+test('host failover requires the lowest online existing participant and an offline host', () => {
+    const t = setup(3);
+    const incoming = T.clone(t);
+    incoming.host = 'b@x';
+    incoming.rev++;
+    assert.equal(T.canPublishState(t, incoming, 'b@x', new Set(['a@x', 'b@x'])), false);
+    assert.equal(T.canPublishState(t, incoming, 'b@x', new Set(['b@x', 'c@x'])), true);
+    incoming.host = 'c@x';
+    assert.equal(T.canPublishState(t, incoming, 'c@x', new Set(['b@x', 'c@x'])), false);
+    assert.equal(T.canPublishState(t, incoming, 'c@x', new Set(['c@x'])), true);
+    assert.equal(T.canPublishState(t, incoming, 'c@x', null), true, 'replay requires existing membership, not historical presence');
+    T.withdraw(t, 'c@x');
+    incoming.rev = t.rev + 1;
+    assert.equal(T.canPublishState(t, incoming, 'c@x', null), false);
+    incoming.host = 'outsider';
+    assert.equal(T.canPublishState(t, incoming, 'outsider', null), false);
+});
+
+test('tournament schema validates fields used in standings and game rendering', () => {
+    const t = setup(2);
+    T.startGame(t, 'g', 'a@x', 'b@x', 1);
+    assert.equal(T.isValidState(t), true);
+    assert.equal(T.isValidState({ ...t, rev: Infinity }), false);
+    assert.equal(T.isValidState({ ...t, host: 'unknown' }), false);
+    assert.equal(T.isValidState({ ...t, games: [] }), false);
+    assert.equal(T.isValidState({
+        ...t, players: { ...t.players, 'a@x': { ...t.players['a@x'], results: ['" onclick="alert(1)'] } }
+    }), false);
+    assert.equal(T.isValidState({
+        ...t, games: { g: { ...t.games.g, white: '__proto__' } }
+    }), false);
+});

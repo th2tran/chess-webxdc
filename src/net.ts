@@ -62,7 +62,7 @@ function isMessage(value: unknown): value is Message {
     if (!value || typeof value !== 'object') return false;
     const m = value as Partial<Message>;
     return m.app === APP_ID && typeof m.id === 'string' && typeof m.type === 'string'
-        && typeof m.from === 'string' && typeof m.ts === 'number';
+        && typeof m.from === 'string' && typeof m.name === 'string' && Number.isFinite(m.ts);
 }
 
 const encoder = new TextEncoder();
@@ -125,7 +125,7 @@ export class Net {
     private receive(raw: unknown, source: 'realtime' | 'update'): void {
         if (!isMessage(raw) || !this.remember(raw.id)) return;
         try {
-            this.handler(raw, { replay: this.replaying, local: raw.from === this.me.addr, source });
+            this.handler(raw, { replay: this.replaying, local: false, source });
         } catch (err) {
             console.error('chess: failed to handle message', raw, err);
         }

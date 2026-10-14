@@ -316,3 +316,19 @@ export function bestMove(chess: Chess, level: number): { uci: string; score: num
     const res = shared.search(chess, LEVELS[level] || LEVELS[3]);
     return res ? { uci: chess.toUci(res.move), score: res.score, depth: res.depth } : null;
 }
+
+/** One-ply fallback that yields between candidates when workers are unavailable. */
+export async function fallbackMove(chess: Chess): Promise<string | null> {
+    const moves = chess.legalMoves();
+    let best: Move | null = null;
+    let score = -Infinity;
+    for (const move of moves) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        chess.makeMove(move);
+        const status = chess.status();
+        const value = status.reason === 'checkmate' ? MATE : status.over ? 0 : -evaluate(chess);
+        chess.undoMove();
+        if (value > score) { score = value; best = move; }
+    }
+    return best ? chess.toUci(best) : null;
+}
