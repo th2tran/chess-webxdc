@@ -750,7 +750,7 @@ function tournamentLoop(): void {
 
 let worker: Worker | null = null;
 try {
-    worker = new Worker('build/ai-worker.js');
+    worker = new Worker('assets/ai-worker.js');
     worker.onmessage = (e: MessageEvent<AiResponse>) => onAiResponse(e.data);
     worker.onerror = () => { worker = null; };
 } catch {
