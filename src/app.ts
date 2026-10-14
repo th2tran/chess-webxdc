@@ -1,7 +1,7 @@
 /* Main application: game modes, peer presence, challenges, tournaments and rendering. */
 import { Chess, type Color, type GameResult, type PieceType } from './engine.ts';
 import { fallbackMove, LEVEL_NAMES } from './ai.ts';
-import { BoardView, type BoardState } from './board.ts';
+import { BoardView, type BoardState, type BoardHint } from './board.ts';
 import { GameRecord, NETWORK_TC_MS, FLAG_GRACE_MS, describeResult, opposite } from './game.ts';
 import { Net, randomId, type Message, type MessageOf, type PeerStatus, type PlayerRef, type ReceiveContext } from './net.ts';
 import * as T from './tournament.ts';
@@ -10,6 +10,7 @@ import { $, esc, formatClock, formatDuration, loadJson, Modals, saveJson, Sounds
 import type { AiRequest, AiResponse } from './ai-worker.ts';
 import { canMove, canEndGame, canDeclineDraw, validClock, validSync, syncClock, pruneCompletedGames, MAX_PENDING_MOVES } from './protocol.ts';
 import { importPgn, PgnError } from './pgn.ts';
+import { canRequestHint, describeHint } from './learner.ts';
 
 type Mode = 'computer' | 'network' | 'tournament';
 type Tab = 'peers' | 'chat' | 'standings';
@@ -45,9 +46,10 @@ interface SavedComputerGame {
     moves: string[];
     result: GameResult | null;
     reason: string | null;
+    learnerMode?: boolean;
 }
 
-interface Prefs { muted: boolean; level: number; color: Color | 'random'; mode: Mode; }
+interface Prefs { muted: boolean; level: number; color: Color | 'random'; mode: Mode; learnerMode: boolean; }
 
 const CHALLENGE_TTL_MS = 60000;
 const SYNC_RETRY_MS = 5000;
@@ -62,7 +64,7 @@ const sounds = new Sounds();
 const modals = new Modals($('#modal-root'));
 const appStart = Date.now();
 
-const prefs: Prefs = { muted: false, level: 3, color: 'random', mode: 'computer', ...loadJson<Partial<Prefs>>(STORAGE_PREFS, {}) };
+const prefs: Prefs = { muted: false, level: 3, color: 'random', mode: 'computer', learnerMode: false, ...loadJson<Partial<Prefs>>(STORAGE_PREFS, {}) };
 sounds.muted = prefs.muted;
 
 const S = {
@@ -860,7 +862,7 @@ function startComputerGame(color: Color | 'random', level: number, restore?: Sav
     const ai = computerRef(level);
     const g = new GameRecord({
         id: restore?.id || randomId('c'), kind: 'computer', white: myColor === 'w' ? me : ai, black: myColor === 'w' ? ai : me,
-        tc: 0, startTs: restore?.startTs || now(), level
+        tc: 0, startTs: restore?.startTs || now(), level, learnerMode: restore ? restore.learnerMode === true : prefs.learnerMode
     });
     if (restore) {
         for (const uci of restore.moves) if (!g.applyMove(uci, null, now())) break;
@@ -882,7 +884,7 @@ function saveComputerGame(): void {
     if (!g || g.kind !== 'computer') return;
     const saved: SavedComputerGame = {
         id: g.id, myColor: myColorIn(g)!, level: g.level, startTs: g.startTs,
-        moves: g.plies.map((p) => p.uci), result: g.result, reason: g.reason
+        moves: g.plies.map((p) => p.uci), result: g.result, reason: g.reason, learnerMode: g.learnerMode
     };
     saveJson(STORAGE_COMPUTER, saved);
 }
@@ -935,6 +937,57 @@ function runAiFallback(req: AiRequest, deliver: (uci: string | null) => void): v
 
 const pendingAi = new Map<number, { req: AiRequest; deliver: (uci: string | null) => void }>();
 
+let hint: { game: GameRecord; fen: string; move: BoardHint | null; worker: Worker | null } | null = null;
+
+function clearHint(): void {
+    hint?.worker?.terminate();
+    hint = null;
+}
+
+function refreshHint(): void {
+    if (hint && (hint.game !== S.game || hint.fen !== hint.game.chess.fen()
+        || !canRequestHint(hint.game, myColorIn(hint.game), S.viewPly !== null, S.aiThinking))) clearHint();
+}
+
+function requestHint(): void {
+    const g = S.game;
+    if (!g || !canRequestHint(g, myColorIn(g), S.viewPly !== null, S.aiThinking)) return;
+    clearHint();
+    const search = { game: g, fen: g.chess.fen(), move: null as BoardHint | null, worker: null as Worker | null };
+    hint = search;
+    const fail = (message: string): void => {
+        if (hint !== search) return;
+        console.warn('chess: hint search failed', message);
+        clearHint();
+        toast('Hint unavailable. Please try again; hints require a working AI worker.', 'warn');
+        scheduleRender();
+    };
+    try {
+        const engine = new Worker('assets/ai-worker.js');
+        search.worker = engine;
+        engine.onerror = (event) => fail(event.message);
+        engine.onmessage = (event: MessageEvent<AiResponse>) => {
+            if (hint !== search) return;
+            refreshHint();
+            if (hint !== search) return;
+            const response = event.data;
+            if (response.error || !response.uci) { fail(response.error || 'No move returned'); return; }
+            const text = describeHint(search.fen, response.uci);
+            if (!text) { fail('The engine returned an illegal move'); return; }
+            engine.terminate();
+            search.worker = null;
+            const move = new Chess(search.fen).move(response.uci)!;
+            search.move = { from: move.from, to: move.to, label: text, promotion: move.promotion };
+            scheduleRender();
+        };
+        const req: AiRequest = { id: 1, startFen: search.fen, moves: [], level: 5 };
+        engine.postMessage(req);
+    } catch (err) {
+        fail(err instanceof Error ? err.message : String(err));
+    }
+    scheduleRender();
+}
+
 function onAiResponse(res: AiResponse): void {
     const pending = pendingAi.get(res.id);
     if (pending) {
@@ -971,7 +1024,10 @@ function openComputerSetup(): void {
             <div class="field-label">Your color</div>
             <div class="choice-row">${(['w', 'random', 'b'] as const).map((c) => `<label class="choice">
                 <input type="radio" name="color" value="${c}" ${prefs.color === c ? 'checked' : ''}>
-                <span class="color-chip ${c}">${c === 'w' ? 'White' : c === 'b' ? 'Black' : 'Random'}</span></label>`).join('')}</div>`,
+                <span class="color-chip ${c}">${c === 'w' ? 'White' : c === 'b' ? 'Black' : 'Random'}</span></label>`).join('')}</div>
+            <label class="learner-option"><input type="checkbox" name="learner-mode" ${prefs.learnerMode ? 'checked' : ''}>
+                <span>Learner mode</span></label>
+            <p class="dim small">Show a Hint button to suggest a move on your turn.</p>`,
         buttons: [
             { label: 'Cancel', kind: 'secondary' },
             {
@@ -979,6 +1035,7 @@ function openComputerSetup(): void {
                     prefs.level = Number(dialog.querySelector<HTMLInputElement>('input[name=level]:checked')?.value || 3);
                     prefs.color = (dialog.querySelector<HTMLInputElement>('input[name=color]:checked')?.value || 'random') as Color | 'random';
                     prefs.mode = 'computer';
+                    prefs.learnerMode = dialog.querySelector<HTMLInputElement>('input[name=learner-mode]')?.checked === true;
                     savePrefs();
                     startComputerGame(prefs.color, prefs.level);
                 }
@@ -1261,7 +1318,8 @@ function renderBoard(): void {
             dests.set(m.from, list);
         }
     }
-    board.render({ pieces, lastMove: last ? { from: last.from, to: last.to } : null, checkSquare: checkSq, mateSquare: mateSq, movable, dests });
+    board.render({ pieces, lastMove: last ? { from: last.from, to: last.to } : null,
+        hint: hint?.move ?? null, checkSquare: checkSq, mateSquare: mateSq, movable, dests });
     $('#board-wrap').classList.toggle('history', !!g && !isLive);
 }
 
@@ -1414,6 +1472,10 @@ function renderActions(): void {
         html = g.over
             ? button('Play again', 'computer-again', 'primary') + button('New game…', 'computer-setup')
             : button('Takeback', 'takeback', 'secondary', S.aiThinking || !g.plies.length) + button('Resign', 'resign', 'danger') + button('New game…', 'computer-setup');
+        if (g.learnerMode && !g.over) {
+            html += button(hint?.worker ? 'Finding hint…' : 'Hint', 'hint', 'secondary',
+                !!hint?.worker || !canRequestHint(g, mine, S.viewPly !== null, S.aiThinking));
+        }
     } else if (!g.over) {
         if (g.drawOffer && g.drawOffer !== me.addr) {
             html = `<p class="center offer">${esc(g.player(opposite(mine)).name)} offers a draw</p>`
@@ -1560,6 +1622,7 @@ function renderNav(): void {
 }
 
 function render(): void {
+    refreshHint();
     renderModes();
     renderGameInfo();
     renderBoard();
@@ -1672,6 +1735,7 @@ function bindEvents(): void {
         else if (e.key === 'f') { S.flipped = !S.flipped; render(); }
     });
     window.addEventListener('pagehide', () => {
+        clearHint();
         if (net.hasRealtime) net.send({ type: 'bye' });
         net.leave();
     });
@@ -1693,6 +1757,7 @@ function navigate(nav: string): void {
 function runAction(action: string): void {
     if (action.startsWith('goto-game:')) { watchGame(action.slice('goto-game:'.length)); return; }
     switch (action) {
+        case 'hint': requestHint(); break;
         case 'import-pgn': openPgnImport(); break;
         case 'computer-setup': openComputerSetup(); break;
         case 'computer-again': {

@@ -27,6 +27,7 @@ export interface GameInit {
     tourId?: string | null;
     cid?: string | null;
     level?: number;
+    learnerMode?: boolean;
     pgnTags?: Record<string, string>;
 }
 
@@ -54,6 +55,7 @@ export class GameRecord {
     readonly tourId: string | null;
     readonly cid: string | null;
     readonly level: number;
+    readonly learnerMode: boolean;
     readonly pgnTags: Readonly<Record<string, string>>;
     readonly chess = new Chess();
     readonly startFen: string;
@@ -81,6 +83,7 @@ export class GameRecord {
         this.tourId = init.tourId || null;
         this.cid = init.cid || null;
         this.level = init.level || 0;
+        this.learnerMode = init.kind === 'computer' && init.learnerMode === true;
         this.pgnTags = { ...init.pgnTags };
         this.startFen = this.chess.fen();
         this.clock = { w: init.tc, b: init.tc };

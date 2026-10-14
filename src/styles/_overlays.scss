@@ -71,6 +71,7 @@
 .color-chip.random::before { background: linear-gradient(90deg, #fff 50%, #000 50%); }
 
 .level-name { margin-top: 6px; }
+.learner-option { display: flex; align-items: center; gap: 8px; margin: 14px 0 8px; cursor: pointer; }
 .menu-list { display: flex; flex-direction: column; gap: 6px; .btn { text-align: left; } }
 .rules { margin: 0; padding-left: 18px; li { margin: 3px 0; } }
 .podium { list-style: none; padding: 0; margin: 0; font-size: 16px; li { padding: 4px 0; } }

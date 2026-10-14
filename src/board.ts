@@ -4,10 +4,27 @@ import { pieceUrl } from './pieces.ts';
 
 const FILES = 'abcdefgh';
 
+export interface BoardHint { from: string; to: string; label: string; promotion: PieceType | null; }
+
+export function hintArrowPath(from: string, to: string, orientation: Color): string {
+    const center = (square: string): [number, number] => {
+        const file = FILES.indexOf(square[0]), rank = Number(square[1]) - 1;
+        return orientation === 'w' ? [file + 0.5, 7.5 - rank] : [7.5 - file, rank + 0.5];
+    };
+    const [x, y] = center(from);
+    const [tx, ty] = center(to);
+    const length = Math.hypot(tx - x, ty - y);
+    if (!length) return '';
+    const dx = (tx - x) / length, dy = (ty - y) / length;
+    const bx = tx - dx * 0.45, by = ty - dy * 0.45;
+    return `M ${x - dy * 0.09} ${y + dx * 0.09} L ${bx - dy * 0.09} ${by + dx * 0.09} L ${bx - dy * 0.3} ${by + dx * 0.3} L ${tx} ${ty} L ${bx + dy * 0.3} ${by - dx * 0.3} L ${bx + dy * 0.09} ${by - dx * 0.09} L ${x + dy * 0.09} ${y - dx * 0.09} Z`;
+}
+
 export interface BoardState {
     /** piece lookup by square name */
     pieces: Map<string, Piece>;
     lastMove: { from: string; to: string } | null;
+    hint: BoardHint | null;
     checkSquare: string | null;
     mateSquare: string | null;
     /** Color that may currently be moved by the user (null = board is read-only). */
@@ -28,6 +45,7 @@ export class BoardView {
     private selected: string | null = null;
     private drag: { from: string; ghost: HTMLElement | null; startX: number; startY: number; pointerId: number; wasSelected: boolean } | null = null;
     private promo: HTMLElement | null = null;
+    private hintOverlay: SVGSVGElement | null = null;
 
     private callbacks: BoardCallbacks;
 
@@ -72,6 +90,11 @@ export class BoardView {
                 this.squares.set(name, sq);
             }
         }
+        this.hintOverlay = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        this.hintOverlay.classList.add('hint-overlay');
+        this.hintOverlay.setAttribute('viewBox', '0 0 8 8');
+        this.hintOverlay.setAttribute('role', 'img');
+        this.root.appendChild(this.hintOverlay);
     }
 
     render(state: BoardState): void {
@@ -95,6 +118,23 @@ export class BoardView {
             sq.classList.toggle('occupied', !!p);
             sq.classList.toggle('movable', !!p && p.color === state.movable && state.dests.has(name));
         }
+        const overlay = this.hintOverlay!;
+        overlay.replaceChildren();
+        overlay.style.display = state.hint ? '' : 'none';
+        if (state.hint) {
+            overlay.setAttribute('aria-label', `Suggested move: ${state.hint.label}`);
+            const arrow = document.createElementNS(overlay.namespaceURI, 'path');
+            arrow.setAttribute('d', hintArrowPath(state.hint.from, state.hint.to, this.orientation));
+            overlay.appendChild(arrow);
+            if (state.hint.promotion) {
+                const badge = document.createElementNS(overlay.namespaceURI, 'text');
+                const file = FILES.indexOf(state.hint.to[0]), rank = Number(state.hint.to[1]) - 1;
+                badge.setAttribute('x', String(this.orientation === 'w' ? file + 0.5 : 7.5 - file));
+                badge.setAttribute('y', String(this.orientation === 'w' ? 7.5 - rank : rank + 0.5));
+                badge.textContent = state.hint.promotion.toUpperCase();
+                overlay.appendChild(badge);
+            }
+        } else overlay.removeAttribute('aria-label');
     }
 
     private squareAt(x: number, y: number): string | null {

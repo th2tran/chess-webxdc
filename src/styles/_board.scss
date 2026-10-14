@@ -104,6 +104,26 @@
     }
 }
 
+.hint-overlay {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 5;
+    pointer-events: none;
+    path { fill: rgba(35, 155, 230, .85); stroke: rgba(255, 255, 255, .8); stroke-width: .035; }
+    text {
+        fill: #fff;
+        stroke: #134d72;
+        stroke-width: .06;
+        paint-order: stroke;
+        font-size: .45px;
+        font-weight: 700;
+        text-anchor: middle;
+        dominant-baseline: central;
+    }
+}
+
 .promotion {
     position: absolute;
     inset: 0;
