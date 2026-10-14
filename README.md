@@ -21,6 +21,12 @@ A chess game for [webxdc](https://webxdc.org) messengers such as Vector Chat, wi
 - **Trust model:** webxdc payload addresses are self-declared, not authenticated sender identities. These checks prevent spectators acting under their own addresses, but cannot prevent address impersonation, a dishonest tournament host, or forged historical timing. Play with trusted chat participants; this is not a cheat-proof competition protocol.
 - The tab retains the latest 100 completed game records, plus the displayed game and all unfinished games. Older records are no longer available in the in-app crosstable or for PGN export. Expired challenges and silently disconnected peers are also removed from memory; persisted messenger history is unaffected.
 
+## Importing a PGN from chat
+
+Open **Menu → Import PGN**, paste one exported game copied from chat, and select **Import game**. The imported game opens locally in read-only review mode: click moves or use the navigation arrows to replay the board, flip it, or use **Copy PGN** to export it again. Names, result, and PGN headers are retained. Imported games are not broadcast, do not affect tournament scores, and are available until closed or the app is reloaded. Saved computer games are not overwritten.
+
+The importer accepts SAN moves, optional move numbers, comments, annotations, and variations (only the main line is imported). It also accepts a surrounding Markdown code block and the clipped first `Event` header sometimes produced when selecting text in chat. Illegal moves, malformed headers, conflicting results, and multiple games are rejected with an error so you can correct the pasted text. Custom FEN starting positions are not currently supported. Finish any active network game before importing.
+
 ## Development
 
 Requires Node.js. Sources are TypeScript (`src/`, bundled with esbuild) and SCSS (`src/styles/`, compiled with sass).

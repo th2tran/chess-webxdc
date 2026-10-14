@@ -9,6 +9,7 @@ import { pieceUrl } from './pieces.ts';
 import { $, esc, formatClock, formatDuration, loadJson, Modals, saveJson, Sounds, timeAgo, toast } from './ui.ts';
 import type { AiRequest, AiResponse } from './ai-worker.ts';
 import { canMove, canEndGame, canDeclineDraw, validClock, validSync, syncClock, pruneCompletedGames, MAX_PENDING_MOVES } from './protocol.ts';
+import { importPgn, PgnError } from './pgn.ts';
 
 type Mode = 'computer' | 'network' | 'tournament';
 type Tab = 'peers' | 'chat' | 'standings';
@@ -110,6 +111,7 @@ function onlineSet(): Set<string> {
 
 function myColorIn(g: GameRecord | null): Color | null {
     if (!g) return null;
+    if (g.kind === 'imported') return null;
     if (g.kind === 'computer') return g.white.addr === me.addr ? 'w' : 'b';
     return g.colorOf(me.addr);
 }
@@ -1114,6 +1116,47 @@ function copyPgn(): void {
     else fallback();
 }
 
+function openPgnImport(): void {
+    if (myActiveNetworkGame()) { toast('Finish your network game before importing a PGN.', 'warn'); return; }
+    modals.show({
+        id: 'pgn-import', title: 'Import PGN', dismissible: true,
+        body: `<p>Paste one game copied from chat. The game opens for local, read-only review.</p>
+            <label for="pgn-input">PGN game</label>
+            <textarea id="pgn-input" class="pgn" rows="10" spellcheck="false" aria-describedby="pgn-error" placeholder='[Event "Game vs computer"]'></textarea>
+            <p id="pgn-error" role="alert" class="dim small"></p>`,
+        buttons: [
+            { label: 'Cancel', kind: 'secondary' },
+            {
+                label: 'Import game', kind: 'primary', action: (dialog) => {
+                    const input = dialog.querySelector<HTMLTextAreaElement>('#pgn-input')!;
+                    const error = dialog.querySelector<HTMLElement>('#pgn-error')!;
+                    if (myActiveNetworkGame()) {
+                        error.textContent = 'Finish your network game before importing a PGN.';
+                        return false;
+                    }
+                    let imported: GameRecord;
+                    try {
+                        imported = importPgn(input.value, randomId('pgn'));
+                    } catch (err) {
+                        if (!(err instanceof PgnError)) throw err;
+                        error.textContent = err.message;
+                        input.focus();
+                        return false;
+                    }
+                    S.aiRequestId++;
+                    S.aiThinking = false;
+                    S.game = imported;
+                    S.viewPly = null;
+                    S.flipped = false;
+                    sendPresence(true);
+                    render();
+                    toast(`Imported ${imported.plies.length} half-moves. Use the move list or arrows to review.`, 'success');
+                }
+            }
+        ]
+    });
+}
+
 function openMenu(): void {
     modals.show({
         id: 'menu', title: 'Menu', dismissible: true,
@@ -1121,6 +1164,7 @@ function openMenu(): void {
             <button class="btn secondary" data-act="flip">Flip board</button>
             <button class="btn secondary" data-act="sound">${sounds.muted ? 'Turn sound on' : 'Turn sound off'}</button>
             ${S.game ? '<button class="btn secondary" data-act="pgn">Copy PGN</button>' : ''}
+            <button class="btn secondary" data-act="import-pgn">Import PGN</button>
             ${S.game && (S.game.over || !myColorIn(S.game)) ? '<button class="btn secondary" data-act="leave">Close this game</button>' : ''}
         </div><p class="dim small">Version ${esc(window.APP_VERSION || 'dev')} • ${net.available ? (net.hasRealtime ? 'realtime connected' : 'messenger updates') : 'offline'}</p>`,
         buttons: [{ label: 'Close', kind: 'secondary' }],
@@ -1130,6 +1174,7 @@ function openMenu(): void {
             if (act === 'flip') { S.flipped = !S.flipped; render(); }
             if (act === 'sound') toggleSound();
             if (act === 'pgn') copyPgn();
+            if (act === 'import-pgn') openPgnImport();
             if (act === 'leave') leaveGame();
         }))
     });
@@ -1222,12 +1267,14 @@ function renderBoard(): void {
 
 function modeLabel(g: GameRecord | null): string {
     if (!g) return '';
+    if (g.kind === 'imported') return `Read-only • <span class="accent">IMPORTED PGN</span>`;
     if (g.kind === 'computer') return `Unlimited • Casual • <span class="accent">VS COMPUTER</span>`;
     if (g.kind === 'tournament') return `5+0 • Arena • <span class="accent">TOURNAMENT</span>`;
     return `5+0 • Casual • <span class="accent">NETWORK</span>`;
 }
 
 function gameStatusText(g: GameRecord): string {
+    if (g.kind === 'imported' && !g.result) return 'Unfinished game • Review only';
     if (g.over) return describeResult(g.result, g.reason);
     const mine = myColorIn(g);
     if (g.kind === 'computer' && S.aiThinking) return 'Computer is thinking…';
@@ -1359,6 +1406,8 @@ function renderActions(): void {
         if (S.mode === 'computer') html = button('New game vs computer', 'computer-setup', 'primary');
         else if (S.mode === 'network') html = `<p class="dim center">Choose a peer in the <b>Peers</b> tab to challenge.</p>`;
         else html = tourActionsHtml();
+    } else if (g.kind === 'imported') {
+        html = `<p class="dim center">Imported game • Review only</p>${button('Import another PGN', 'import-pgn')}${button('Close game', 'leave')}`;
     } else if (!mine) {
         html = `<p class="dim center">Spectating</p>${button('Stop watching', 'leave')}`;
     } else if (g.kind === 'computer') {
@@ -1470,7 +1519,7 @@ function renderStandings(): void {
 function renderCrosstable(): void {
     const g = S.game;
     const node = $('#crosstable');
-    if (!g || g.kind === 'computer') { node.innerHTML = ''; node.hidden = true; return; }
+    if (!g || g.kind === 'computer' || g.kind === 'imported') { node.innerHTML = ''; node.hidden = true; return; }
     const a = g.white, b = g.black;
     const games = [...S.games.values()].filter((x) => x.over && x.result && x.reason !== 'aborted'
         && ((x.white.addr === a.addr && x.black.addr === b.addr) || (x.white.addr === b.addr && x.black.addr === a.addr)))
@@ -1644,6 +1693,7 @@ function navigate(nav: string): void {
 function runAction(action: string): void {
     if (action.startsWith('goto-game:')) { watchGame(action.slice('goto-game:'.length)); return; }
     switch (action) {
+        case 'import-pgn': openPgnImport(); break;
         case 'computer-setup': openComputerSetup(); break;
         case 'computer-again': {
             const g = S.game;

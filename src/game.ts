@@ -1,8 +1,8 @@
-/* Game record: position + move history + chess clock. Shared by computer and network games. */
+/* Game record: position, move history and chess clock for live games and imported PGN reviews. */
 import { Chess, type Color, type GameResult, type PieceType, type Status } from './engine.ts';
 import type { Clock, PlayerRef } from './net.ts';
 
-export type GameKind = 'computer' | 'network' | 'tournament';
+export type GameKind = 'computer' | 'network' | 'tournament' | 'imported';
 
 export interface PlyRecord {
     uci: string;
@@ -27,6 +27,7 @@ export interface GameInit {
     tourId?: string | null;
     cid?: string | null;
     level?: number;
+    pgnTags?: Record<string, string>;
 }
 
 export const NETWORK_TC_MS = 5 * 60 * 1000;
@@ -53,6 +54,7 @@ export class GameRecord {
     readonly tourId: string | null;
     readonly cid: string | null;
     readonly level: number;
+    readonly pgnTags: Readonly<Record<string, string>>;
     readonly chess = new Chess();
     readonly startFen: string;
     plies: PlyRecord[] = [];
@@ -79,6 +81,7 @@ export class GameRecord {
         this.tourId = init.tourId || null;
         this.cid = init.cid || null;
         this.level = init.level || 0;
+        this.pgnTags = { ...init.pgnTags };
         this.startFen = this.chess.fen();
         this.clock = { w: init.tc, b: init.tc };
         this.turnStart = init.startTs;
@@ -183,7 +186,7 @@ export class GameRecord {
         const date = new Date(this.startTs);
         const pad = (n: number): string => String(n).padStart(2, '0');
         const headers: [string, string][] = [
-            ['Event', this.kind === 'tournament' ? 'Arena tournament' : this.kind === 'computer' ? 'Game vs computer' : 'Casual game'],
+            ['Event', this.kind === 'tournament' ? 'Arena tournament' : this.kind === 'computer' ? 'Game vs computer' : this.kind === 'imported' ? 'Imported game' : 'Casual game'],
             ['Site', 'webxdc'],
             ['Date', `${date.getFullYear()}.${pad(date.getMonth() + 1)}.${pad(date.getDate())}`],
             ['White', this.white.name],
@@ -197,6 +200,10 @@ export class GameRecord {
             if (i % 2 === 0) moves += `${i / 2 + 1}. `;
             moves += p.san + ' ';
         });
-        return headers.map(([k, v]) => `[${k} "${v.replace(/"/g, "'")}"]`).join('\n') + '\n\n' + moves + (this.result || '*') + '\n';
+        const tags = new Map(headers);
+        for (const [key, value] of Object.entries(this.pgnTags)) tags.set(key, value);
+        tags.set('Result', this.result || '*');
+        const escapeTag = (value: string): string => value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/[\r\n]/g, ' ');
+        return [...tags].map(([k, v]) => `[${k} "${escapeTag(v)}"]`).join('\n') + '\n\n' + moves + (this.result || '*') + '\n';
     }
 }
