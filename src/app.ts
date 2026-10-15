@@ -46,6 +46,7 @@ interface SavedComputerGame {
     result: GameResult | null;
     reason: string | null;
     learnerMode?: boolean;
+    startFen?: string;
 }
 
 interface Prefs { muted: boolean; level: number; color: Color | 'random'; mode: Mode; learnerMode: boolean; }
@@ -865,12 +866,14 @@ function computerRef(level: number): PlayerRef {
     return { addr: AI_ADDR, name: `Computer · ${LEVEL_NAMES[level] || 'Level ' + level}` };
 }
 
-function startComputerGame(color: Color | 'random', level: number, restore?: SavedComputerGame): void {
-    const myColor: Color = restore ? restore.myColor : color === 'random' ? (Math.random() < 0.5 ? 'w' : 'b') : color;
+function startComputerGame(color: Color | 'random', level: number, restore?: SavedComputerGame, startFen?: string): void {
+    const myColor: Color = restore ? restore.myColor : startFen ? new Chess(startFen).turnColor()
+        : color === 'random' ? (Math.random() < 0.5 ? 'w' : 'b') : color;
     const ai = computerRef(level);
     const g = new GameRecord({
         id: restore?.id || randomId('c'), kind: 'computer', white: myColor === 'w' ? me : ai, black: myColor === 'w' ? ai : me,
-        tc: 0, startTs: restore?.startTs || now(), level, learnerMode: restore ? restore.learnerMode === true : prefs.learnerMode
+        tc: 0, startTs: restore?.startTs || now(), level, learnerMode: restore ? restore.learnerMode === true : prefs.learnerMode,
+        startFen: restore?.startFen || startFen
     });
     if (restore) {
         for (const uci of restore.moves) if (!g.applyMove(uci, null, now())) break;
@@ -881,6 +884,7 @@ function startComputerGame(color: Color | 'random', level: number, restore?: Sav
     S.flipped = false;
     S.mode = 'computer';
     S.aiThinking = false;
+    S.aiRequestId++;
     if (!restore) saveComputerGame();
     sendPresence(true);
     render();
@@ -910,7 +914,8 @@ function saveComputerGame(): void {
     if (!g || g.kind !== 'computer') return;
     const saved: SavedComputerGame = {
         id: g.id, myColor: myColorIn(g)!, level: g.level, startTs: g.startTs,
-        moves: g.plies.map((p) => p.uci), result: g.result, reason: g.reason, learnerMode: g.learnerMode
+        moves: g.plies.map((p) => p.uci), result: g.result, reason: g.reason, learnerMode: g.learnerMode,
+        startFen: g.startFen
     };
     saveJson(STORAGE_COMPUTER, saved);
 }
@@ -1101,8 +1106,10 @@ function onAiResponse(res: AiResponse): void {
     render();
 }
 
-function openComputerSetup(): void {
+function openComputerSetup(startFen?: string): void {
     if (myActiveNetworkGame()) { toast('Finish your current network game first.', 'warn'); return; }
+    const position = startFen ? new Chess(startFen) : null;
+    if (position?.status().over) { toast('This position is already finished. Choose an earlier position to play from.', 'warn'); return; }
     modals.show({
         id: 'computer-setup',
         title: 'Play against the computer',
@@ -1112,10 +1119,10 @@ function openComputerSetup(): void {
                 <input type="radio" name="level" value="${l}" ${prefs.level === l ? 'checked' : ''}>
                 <span class="level-chip" title="${LEVEL_NAMES[l]}">${l}</span></label>`).join('')}</div>
             <div class="dim level-name"></div>
-            <div class="field-label">Your color</div>
+            ${position ? `<p>You play ${position.turnColor() === 'w' ? 'White' : 'Black'} and move first from the displayed position.</p>` : `<div class="field-label">Your color</div>
             <div class="choice-row">${(['w', 'random', 'b'] as const).map((c) => `<label class="choice">
                 <input type="radio" name="color" value="${c}" ${prefs.color === c ? 'checked' : ''}>
-                <span class="color-chip ${c}">${c === 'w' ? 'White' : c === 'b' ? 'Black' : 'Random'}</span></label>`).join('')}</div>
+                <span class="color-chip ${c}">${c === 'w' ? 'White' : c === 'b' ? 'Black' : 'Random'}</span></label>`).join('')}</div>`}
             <label class="learner-option"><input type="checkbox" name="learner-mode" ${prefs.learnerMode ? 'checked' : ''}>
                 <span>Learner mode</span></label>
             <p class="dim small">Show a Hint button to suggest a move on your turn.</p>`,
@@ -1123,12 +1130,13 @@ function openComputerSetup(): void {
             { label: 'Cancel', kind: 'secondary' },
             {
                 label: 'Start game', kind: 'primary', action: (dialog) => {
+                    if (myActiveNetworkGame()) { toast('Finish your current network game first.', 'warn'); return false; }
                     prefs.level = Number(dialog.querySelector<HTMLInputElement>('input[name=level]:checked')?.value || 3);
-                    prefs.color = (dialog.querySelector<HTMLInputElement>('input[name=color]:checked')?.value || 'random') as Color | 'random';
+                    if (!position) prefs.color = (dialog.querySelector<HTMLInputElement>('input[name=color]:checked')?.value || 'random') as Color | 'random';
                     prefs.mode = 'computer';
                     prefs.learnerMode = dialog.querySelector<HTMLInputElement>('input[name=learner-mode]')?.checked === true;
                     savePrefs();
-                    startComputerGame(prefs.color, prefs.level);
+                    startComputerGame(prefs.color, prefs.level, undefined, startFen);
                 }
             }
         ],
@@ -1526,10 +1534,12 @@ function renderMoves(): void {
     if (!g) { list.innerHTML = '<div class="moves-empty dim">No game in progress</div>'; return; }
     const cur = viewPly(g);
     let html = '';
-    for (let i = 0; i < g.plies.length; i += 2) {
+    const offset = g.startFen.split(' ')[1] === 'b' ? 1 : 0;
+    for (let slot = 0; g.plies.length > 0 && slot < g.plies.length + offset; slot += 2) {
+        const i = slot - offset;
         const w = g.plies[i], b = g.plies[i + 1];
-        html += `<div class="move-row"><span class="move-no">${i / 2 + 1}</span>
-            <button class="move ${cur === i + 1 ? 'active' : ''}" data-ply="${i + 1}">${esc(w.san)}</button>
+        html += `<div class="move-row"><span class="move-no">${g.moveNumberAt(Math.max(0, i))}</span>
+            ${w ? `<button class="move ${cur === i + 1 ? 'active' : ''}" data-ply="${i + 1}">${esc(w.san)}</button>` : '<span></span>'}
             ${b ? `<button class="move ${cur === i + 2 ? 'active' : ''}" data-ply="${i + 2}">${esc(b.san)}</button>` : '<span></span>'}</div>`;
     }
     if (g.over) {
@@ -1556,7 +1566,7 @@ function renderActions(): void {
         else if (S.mode === 'network') html = `<p class="dim center">Choose a peer in the <b>Peers</b> tab to challenge.</p>`;
         else html = tourActionsHtml();
     } else if (g.kind === 'imported') {
-        html = `<p class="dim center">Imported game • Review only</p>${button('Import another PGN', 'import-pgn')}${button('Close game', 'leave')}`;
+        html = `<p class="dim center">Imported game • Review only</p>${button('Play from here', 'play-from-here', 'primary')}${button('Import another PGN', 'import-pgn')}${button('Close game', 'leave')}`;
     } else if (!mine) {
         html = `<p class="dim center">Spectating</p>${button('Stop watching', 'leave')}`;
     } else if (g.kind === 'computer') {
@@ -1851,6 +1861,11 @@ function runAction(action: string): void {
     switch (action) {
         case 'hint': requestHint(); break;
         case 'import-pgn': openPgnImport(); break;
+        case 'play-from-here': {
+            const g = S.game;
+            if (g?.kind === 'imported') openComputerSetup(g.fenAt(viewPly(g)));
+            break;
+        }
         case 'computer-setup': openComputerSetup(); break;
         case 'computer-again': {
             const g = S.game;

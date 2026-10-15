@@ -1,5 +1,5 @@
 /* Game record: position, move history and chess clock for live games and imported PGN reviews. */
-import { Chess, type Color, type GameResult, type PieceType, type Status } from './engine.ts';
+import { Chess, START_FEN, type Color, type GameResult, type PieceType, type Status } from './engine.ts';
 import type { Clock, PlayerRef } from './net.ts';
 
 export type GameKind = 'computer' | 'network' | 'tournament' | 'imported';
@@ -29,6 +29,7 @@ export interface GameInit {
     level?: number;
     learnerMode?: boolean;
     pgnTags?: Record<string, string>;
+    startFen?: string;
 }
 
 export const NETWORK_TC_MS = 5 * 60 * 1000;
@@ -57,7 +58,7 @@ export class GameRecord {
     readonly level: number;
     readonly learnerMode: boolean;
     readonly pgnTags: Readonly<Record<string, string>>;
-    readonly chess = new Chess();
+    readonly chess: Chess;
     readonly startFen: string;
     plies: PlyRecord[] = [];
     clock: Clock;
@@ -85,6 +86,7 @@ export class GameRecord {
         this.level = init.level || 0;
         this.learnerMode = init.kind === 'computer' && init.learnerMode === true;
         this.pgnTags = { ...init.pgnTags };
+        this.chess = new Chess(init.startFen);
         this.startFen = this.chess.fen();
         this.clock = { w: init.tc, b: init.tc };
         this.turnStart = init.startTs;
@@ -185,6 +187,11 @@ export class GameRecord {
         return counts;
     }
 
+    moveNumberAt(ply: number): number {
+        const fields = this.startFen.split(' ');
+        return Number(fields[5]) + Math.floor((ply + (fields[1] === 'b' ? 1 : 0)) / 2);
+    }
+
     pgn(): string {
         const date = new Date(this.startTs);
         const pad = (n: number): string => String(n).padStart(2, '0');
@@ -200,11 +207,16 @@ export class GameRecord {
         if (this.reason) headers.push(['Termination', this.reason]);
         let moves = '';
         this.plies.forEach((p, i) => {
-            if (i % 2 === 0) moves += `${i / 2 + 1}. `;
+            if (p.color === 'w') moves += `${this.moveNumberAt(i)}. `;
+            else if (i === 0) moves += `${this.moveNumberAt(i)}... `;
             moves += p.san + ' ';
         });
         const tags = new Map(headers);
         for (const [key, value] of Object.entries(this.pgnTags)) tags.set(key, value);
+        if (this.startFen !== START_FEN) {
+            tags.set('SetUp', '1');
+            tags.set('FEN', this.startFen);
+        }
         tags.set('Result', this.result || '*');
         const escapeTag = (value: string): string => value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/[\r\n]/g, ' ');
         return [...tags].map(([k, v]) => `[${k} "${escapeTag(v)}"]`).join('\n') + '\n\n' + moves + (this.result || '*') + '\n';
