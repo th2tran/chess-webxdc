@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { GameRecord, type GameKind } from '../src/game.ts';
-import { canRequestHint, describeHint } from '../src/learner.ts';
+import { canRequestHint, describeHint, matchesCoachAvailability, matchesHintResponse, waitForCoachHint } from '../src/learner.ts';
+import { APP_ID, type MessageOf } from '../src/net.ts';
 import { bestMove } from '../src/ai.ts';
 import { Chess } from '../src/engine.ts';
 
@@ -11,6 +12,51 @@ function game(learnerMode = true, kind: GameKind = 'computer'): GameRecord {
         startTs: 0, tc: 0, learnerMode
     });
 }
+
+test('coach startup availability must be fresh and match the requesting player and probe', () => {
+    const pending = { requestId: 'probe1', sentAt: 20_000 };
+    const reply: MessageOf<'coach-available'> = {
+        app: APP_ID, id: 'available1', from: 'coach', name: 'Coach', ts: 20_100,
+        type: 'coach-available', requestId: 'probe1', to: 'me'
+    };
+    assert.equal(matchesCoachAvailability(reply, pending, 'me', 20_200), true);
+    assert.equal(matchesCoachAvailability(reply, pending, 'me', 30_001), false);
+    assert.equal(matchesCoachAvailability({ ...reply, to: 'other' }, pending, 'me', 20_200), false);
+    assert.equal(matchesCoachAvailability({ ...reply, requestId: 'old' }, pending, 'me', 20_200), false);
+    assert.equal(matchesCoachAvailability({ ...reply, ts: 1 }, pending, 'me', 20_200), false);
+    assert.equal(matchesCoachAvailability({ ...reply, ts: 90_000 }, pending, 'me', 20_200), false);
+});
+
+test('coach timeout falls back once at 30 seconds and stops retry broadcasts', t => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
+    let retries = 0;
+    let fallbacks = 0;
+    waitForCoachHint(() => { retries++; }, () => { fallbacks++; });
+    for (let i = 0; i < 14; i++) t.mock.timers.tick(2000);
+    assert.equal(retries, 14);
+    t.mock.timers.tick(1999);
+    assert.equal(fallbacks, 0, 'do not fall back before the full response window');
+    t.mock.timers.tick(1);
+    assert.equal(fallbacks, 1);
+    const sent = retries;
+    t.mock.timers.tick(60_000);
+    assert.equal(retries, sent, 'no more broadcasts during local analysis');
+    assert.equal(fallbacks, 1);
+});
+
+test('coach reply or position cancellation prevents timeout fallback and retries', t => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
+    let retries = 0;
+    let fallbacks = 0;
+    const cancel = waitForCoachHint(() => { retries++; }, () => { fallbacks++; });
+    t.mock.timers.tick(2000);
+    assert.equal(retries, 1);
+    cancel();
+    cancel();
+    t.mock.timers.tick(60_000);
+    assert.equal(retries, 1);
+    assert.equal(fallbacks, 0);
+});
 
 test('learner mode is opt-in and limited to computer games', () => {
     const old = new GameRecord({
@@ -48,6 +94,21 @@ test('hints show SAN and squares without playing the suggested move', () => {
     assert.equal(describeHint(fen, 'e2e5'), null);
     assert.equal(g.chess.fen(), fen);
     assert.equal(g.plies.length, 0);
+});
+
+test('coach replies must match the recipient, request, game and exact position', () => {
+    const g = game();
+    const pending = { requestId: 'hint1', gameId: g.id, fen: g.chess.fen() };
+    const reply: MessageOf<'hint-response'> = {
+        app: APP_ID, id: 'response1', from: 'coach', name: 'Coach', ts: Date.now(),
+        type: 'hint-response', to: 'me', ...pending, uci: 'e2e4'
+    };
+    assert.equal(matchesHintResponse(reply, pending, 'me'), true);
+    for (const patch of [
+        { to: 'another-player' }, { requestId: 'old-request' }, { gameId: 'other-game' },
+        { fen: 'a different position' }
+    ]) assert.equal(matchesHintResponse({ ...reply, ...patch }, pending, 'me'), false);
+    assert.equal(g.chess.fen(), pending.fen, 'receiving a hint never plays it');
 });
 
 test('expert hint search finds mate and explains promotion and castling', () => {

@@ -10,7 +10,7 @@ import { $, esc, formatClock, formatDuration, loadJson, Modals, saveJson, Sounds
 import type { AiRequest, AiResponse } from './ai-worker.ts';
 import { canMove, canEndGame, canDeclineDraw, validClock, validSync, syncClock, pruneCompletedGames, MAX_PENDING_MOVES } from './protocol.ts';
 import { importPgn, PgnError } from './pgn.ts';
-import { canRequestHint, describeHint } from './learner.ts';
+import { canRequestHint, describeHint, matchesCoachAvailability, matchesHintResponse, waitForCoachHint } from './learner.ts';
 import { ChatHistory } from './chat.ts';
 
 type Mode = 'computer' | 'network' | 'tournament';
@@ -183,6 +183,16 @@ function touchPeer(addr: string, name: string, ts: number): Peer {
 // ---------------------------------------------------------------- message handling
 
 function handleMessage(msg: Message, ctx: ReceiveContext): void {
+    if (msg.type === 'coach-probe') return;
+    if (msg.type === 'coach-available') {
+        if (!ctx.local && !ctx.replay) onCoachAvailable(msg);
+        return;
+    }
+    if (msg.type === 'hint-request') return;
+    if (msg.type === 'hint-response') {
+        if (!ctx.local && !ctx.replay) onHintResponse(msg);
+        return;
+    }
     if (!ctx.local && !ctx.replay && msg.from !== me.addr) {
         const wasOnline = isOnline(msg.from);
         touchPeer(msg.from, msg.name, now());
@@ -874,7 +884,25 @@ function startComputerGame(color: Color | 'random', level: number, restore?: Sav
     if (!restore) saveComputerGame();
     sendPresence(true);
     render();
+    probeChessCoach(g);
     maybeAiMove();
+}
+
+let coachProbe: { game: GameRecord; requestId: string; sentAt: number } | null = null;
+
+function probeChessCoach(game: GameRecord): void {
+    coachProbe = null;
+    if (!net.available || game.over || !game.learnerMode) return;
+    coachProbe = { game, requestId: randomId('coach'), sentAt: now() };
+    net.send({ type: 'coach-probe', requestId: coachProbe.requestId });
+}
+
+function onCoachAvailable(msg: MessageOf<'coach-available'>): void {
+    const pending = coachProbe;
+    if (!pending || pending.game !== S.game || pending.game.over || !pending.game.learnerMode
+        || !matchesCoachAvailability(msg, pending, me.addr, now())) return;
+    coachProbe = null;
+    toast('Chess Coach is available and can provide a suggestion when you request HINT in VS-COMPUTER mode.', 'info', 6000);
 }
 
 function saveComputerGame(): void {
@@ -935,10 +963,14 @@ function runAiFallback(req: AiRequest, deliver: (uci: string | null) => void): v
 
 const pendingAi = new Map<number, { req: AiRequest; deliver: (uci: string | null) => void }>();
 
-let hint: { game: GameRecord; fen: string; move: BoardHint | null; worker: Worker | null } | null = null;
+let hint: {
+    game: GameRecord; fen: string; requestId: string; move: BoardHint | null; worker: Worker | null;
+    cancelWait?: () => void; local: boolean;
+} | null = null;
 
 function clearHint(): void {
     hint?.worker?.terminate();
+    hint?.cancelWait?.();
     hint = null;
 }
 
@@ -951,8 +983,37 @@ function requestHint(): void {
     const g = S.game;
     if (!g || !canRequestHint(g, myColorIn(g), S.viewPly !== null, S.aiThinking)) return;
     clearHint();
-    const search = { game: g, fen: g.chess.fen(), move: null as BoardHint | null, worker: null as Worker | null };
+    const search: NonNullable<typeof hint> = {
+        game: g, fen: g.chess.fen(), requestId: randomId('hint'),
+        move: null, worker: null, local: false
+    };
     hint = search;
+    if (net.available) {
+        const payload = {
+            type: 'hint-request' as const, requestId: search.requestId, gameId: g.id,
+            fen: search.fen, startFen: g.startFen, moves: g.plies.map(p => p.uci)
+        };
+        // Discovery can finish after the first broadcast; retry the same request, not a new search.
+        search.cancelWait = waitForCoachHint(() => {
+            refreshHint();
+            if (hint === search && net.hasRealtime) net.send(payload);
+        }, () => {
+            refreshHint();
+            if (hint !== search) return;
+            console.warn('chess: coach hint timed out; using local Expert-level AI');
+            toast('Chess coach did not respond. Using local Expert-level AI for this hint.', 'warn', 5000);
+            requestLocalHint(search);
+        });
+        net.send(payload, { persist: true });
+        scheduleRender();
+        return;
+    }
+    requestLocalHint(search);
+}
+
+function requestLocalHint(search: NonNullable<typeof hint>): void {
+    search.cancelWait?.();
+    search.local = true;
     const fail = (message: string): void => {
         if (hint !== search) return;
         console.warn('chess: hint search failed', message);
@@ -983,6 +1044,38 @@ function requestHint(): void {
     } catch (err) {
         fail(err instanceof Error ? err.message : String(err));
     }
+    scheduleRender();
+}
+
+function failCoachHint(message: string): void {
+    console.warn('chess: coach hint failed', message);
+    clearHint();
+    toast(message, 'warn', 5000);
+    scheduleRender();
+}
+
+function onHintResponse(msg: MessageOf<'hint-response'>): void {
+    refreshHint();
+    const search = hint;
+    if (!search || search.local || search.move || !matchesHintResponse(msg, {
+        requestId: search.requestId, gameId: search.game.id, fen: search.fen
+    }, me.addr)) return;
+    if (typeof msg.error === 'string' && msg.error) {
+        failCoachHint(`Chess coach: ${msg.error.slice(0, 200)}`);
+        return;
+    }
+    if (typeof msg.uci !== 'string' || !/^[a-h][1-8][a-h][1-8][qrbn]?$/.test(msg.uci)) {
+        failCoachHint('Chess coach returned an invalid move. Please try again.');
+        return;
+    }
+    const label = describeHint(search.fen, msg.uci);
+    if (!label) {
+        failCoachHint('Chess coach returned an illegal move. Please try again.');
+        return;
+    }
+    search.cancelWait?.();
+    const move = new Chess(search.fen).move(msg.uci)!;
+    search.move = { from: move.from, to: move.to, label, promotion: move.promotion };
     scheduleRender();
 }
 
@@ -1471,8 +1564,8 @@ function renderActions(): void {
             ? button('Play again', 'computer-again', 'primary') + button('New game…', 'computer-setup')
             : button('Takeback', 'takeback', 'secondary', S.aiThinking || !g.plies.length) + button('Resign', 'resign', 'danger') + button('New game…', 'computer-setup');
         if (g.learnerMode && !g.over) {
-            html += button(hint?.worker ? 'Finding hint…' : 'Hint', 'hint', 'secondary',
-                !!hint?.worker || !canRequestHint(g, mine, S.viewPly !== null, S.aiThinking));
+            html += button(hint && !hint.move ? 'Finding hint…' : 'Hint', 'hint', 'secondary',
+                !!hint && !hint.move || !canRequestHint(g, mine, S.viewPly !== null, S.aiThinking));
         }
     } else if (!g.over) {
         if (g.drawOffer && g.drawOffer !== me.addr) {

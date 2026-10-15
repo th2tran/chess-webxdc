@@ -11,8 +11,23 @@ A chess game for [webxdc](https://webxdc.org) messengers such as Vector Chat, wi
 - **Network · Tournament** – any peer that is not in a game or tournament can start a 60-minute arena tournament. Connected peers get an invitation; those who accept are added to the roster, which is kept in sync on every device (see **Standings**). Games are 5+0 and players are paired automatically after each game (win 2 points, draw 1, doubled after two wins in a row 🔥). No new games start after 60 minutes; the tournament ends once running games finish.
 
 ### Learner mode
+![Chess Learner Mode](screenshots/learner-mode.png)
 
-Check **Learner mode** in **Play against the computer** to show a **Hint** button alongside Takeback and Resign. On your turn, click it for an Expert-level engine suggestion, drawn as a blue arrow directly on the board without playing the move. The arrow follows board orientation; promotion hints also show the promoted piece's letter at the destination. An accessible label describes the move for screen readers. The suggestion clears when the position changes or you navigate into move history. Hints are unavailable during the computer's turn, while reviewing history, or after the game ends. They use a separate Web Worker and do not change your selected opponent strength; if workers are unavailable, an explicit warning is shown rather than a weaker hint. Suggestions are the engine's best move within its search limit, not a guarantee of perfect play.
+Check **Learner mode** in **Play against the computer** to show a **Hint** button alongside Takeback and Resign. On your turn, click it for a suggestion, drawn as a blue arrow directly on the board without playing the move. In a webxdc host, Hint broadcasts the current FEN, starting FEN and UCI move history to the chat's XDC instance, asking the `Mero.xdc` **chess-coach** skill for a Stockfish WASM suggestion. The bot must be running in the same Vector community channel with its Iroh sidecar built, and the app must be open and connected. The request is also sent as a status update for hosts supporting that channel; Vector's bot currently communicates over realtime Iroh gossip, not durable status-update history. Clicking Hint therefore shares this computer-game position with the XDC instance's peers; normal computer moves remain local.
+
+The button shows **Finding hint…** while waiting (up to 30 seconds). If the coach does not respond, the app announces the fallback, stops broadcasting, and uses its separate local Expert-level AI worker for the same position. Late coach replies are ignored once local analysis starts. Explicit coach errors and invalid replies still show a warning rather than triggering the timeout fallback. Requests are retried over realtime to tolerate bot discovery delays. Replies must match the requesting player, request ID, game ID and exact FEN, and the move must be legal. The arrow follows board orientation; promotion hints also show the promoted piece's letter at the destination. An accessible label describes the move for screen readers. The suggestion clears when the position changes or you navigate into move history, which also cancels pending requests and local analysis. Hints are unavailable during the computer's turn, while reviewing history, or after the game ends. When running outside a webxdc host, hints use the local Expert-level Web Worker immediately; worker failures show a warning. Neither path changes your selected opponent strength. Suggestions are the engine's best move within its search limit, not a guarantee of perfect play.
+
+### Chess-coach XDC protocol
+
+When a learner-mode computer game starts, the app sends a lightweight
+`coach-probe` with a `requestId`. A connected coach replies with
+`coach-available`, echoing the ID and addressing `to` to the player. A fresh
+reply within 10 seconds triggers a one-time toast: **Chess Coach is available
+and can provide a suggestion when you request HINT.** This checks the live
+coach service without starting a Stockfish search. No toast is shown for absent
+coaches, non-learner games, historical replies or replies for another game start.
+
+Messages use the existing `chess-xdc/1` envelope (`app`, unique `id`, `from`, `name`, `ts` in milliseconds). A `hint-request` contains `requestId`, `gameId`, `fen`, `startFen` and `moves` (UCI strings). A `hint-response` echoes `requestId`, `gameId`, `fen`, adds `to` (the request's `from`), and contains either `uci` or `error`. Retries retain the same request ID. Responses only suggest a move; they never apply it. These application-level addresses correlate replies but do not authenticate the coach on the realtime channel.
 
 The checkbox preference is remembered, and learner mode is retained when a saved computer game is reopened. It is off by default and never enabled for network games, tournaments, or imported PGN reviews.
 

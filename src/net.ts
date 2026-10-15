@@ -11,6 +11,10 @@ export interface Clock { w: number; b: number; }
 
 export type Payload =
     | { type: 'hello' }
+    | { type: 'coach-probe'; requestId: string }
+    | { type: 'coach-available'; requestId: string; to: string }
+    | { type: 'hint-request'; requestId: string; gameId: string; fen: string; startFen: string; moves: string[] }
+    | { type: 'hint-response'; requestId: string; gameId: string; fen: string; to: string; uci?: string; error?: string }
     | { type: 'presence'; status: PeerStatus; gameId: string | null; tourId: string | null; opp: string | null }
     | { type: 'bye' }
     | { type: 'chat'; text: string }
