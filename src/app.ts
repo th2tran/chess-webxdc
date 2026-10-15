@@ -11,6 +11,7 @@ import type { AiRequest, AiResponse } from './ai-worker.ts';
 import { canMove, canEndGame, canDeclineDraw, validClock, validSync, syncClock, pruneCompletedGames, MAX_PENDING_MOVES } from './protocol.ts';
 import { importPgn, PgnError } from './pgn.ts';
 import { canRequestHint, describeHint } from './learner.ts';
+import { ChatHistory } from './chat.ts';
 
 type Mode = 'computer' | 'network' | 'tournament';
 type Tab = 'peers' | 'chat' | 'standings';
@@ -35,8 +36,6 @@ interface Challenge {
     ts: number;
     state: 'pending' | 'accepted' | 'declined' | 'cancelled';
 }
-
-interface ChatLine { from: string; name: string; text: string; ts: number; }
 
 interface SavedComputerGame {
     id: string;
@@ -63,6 +62,7 @@ const me: PlayerRef = net.me;
 const sounds = new Sounds();
 const modals = new Modals($('#modal-root'));
 const appStart = Date.now();
+const chat = new ChatHistory();
 
 const prefs: Prefs = { muted: false, level: 3, color: 'random', mode: 'computer', learnerMode: false, ...loadJson<Partial<Prefs>>(STORAGE_PREFS, {}) };
 sounds.muted = prefs.muted;
@@ -77,7 +77,6 @@ const S = {
     peers: new Map<string, Peer>(),
     challenges: new Map<string, Challenge>(),
     outgoing: null as string | null,
-    chat: [] as ChatLine[],
     unreadChat: 0,
     tour: null as T.TournamentState | null,
     tourDirty: false,
@@ -231,8 +230,7 @@ function onPresence(msg: MessageOf<'presence'>, ctx: ReceiveContext): void {
 function onChat(msg: MessageOf<'chat'>, ctx: ReceiveContext): void {
     const text = String(msg.text || '').slice(0, 300).trim();
     if (!text) return;
-    S.chat.push({ from: msg.from, name: msg.name, text, ts: msg.ts });
-    if (S.chat.length > 200) S.chat.splice(0, S.chat.length - 200);
+    if (!chat.add({ id: msg.id, from: msg.from, name: msg.name, text, ts: msg.ts })) return;
     if (!ctx.local && !ctx.replay && S.tab !== 'chat') {
         S.unreadChat++;
         sounds.play('notify');
@@ -1546,8 +1544,9 @@ function renderPeers(): void {
 function renderChat(): void {
     const lines = $('#chat-lines');
     const atBottom = lines.scrollTop + lines.clientHeight >= lines.scrollHeight - 30;
-    lines.innerHTML = S.chat.map((c) => `<div class="chat-line ${c.from === me.addr ? 'mine' : ''}">
-        <span class="chat-name">${esc(c.name)}</span> <span class="chat-text">${esc(c.text)}</span></div>`).join('')
+    lines.innerHTML = chat.lines.map((c) => `<div class="chat-line ${c.from === me.addr ? 'mine' : ''}">
+        <span class="chat-name">${esc(c.name)}</span> <time class="chat-time" datetime="${new Date(c.ts).toISOString()}">${esc(new Date(c.ts).toLocaleString())}</time>
+        <span class="chat-text">${esc(c.text)}</span></div>`).join('')
         || '<p class="dim pad">No messages yet.</p>';
     if (atBottom) lines.scrollTop = lines.scrollHeight;
     const badge = $('#chat-unread');

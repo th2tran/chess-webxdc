@@ -111,6 +111,8 @@
 .chat-line {
     padding: 2px 0;
     .chat-name { color: $dim; font-weight: 600; }
+    .chat-time { color: $dim; font-size: 11px; margin-left: 4px; }
+    .chat-text { display: block; }
     &.mine .chat-name { color: $accent; }
 }
 
