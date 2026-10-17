@@ -96,6 +96,29 @@ test('hints show SAN and squares without playing the suggested move', () => {
     assert.equal(g.plies.length, 0);
 });
 
+test('puzzle hints are available on the live player turn without enabling learner mode', () => {
+    const g = game(false, 'puzzle');
+    assert.equal(g.learnerMode, false);
+    assert.equal(canRequestHint(g, 'w', false, false), true);
+    assert.equal(canRequestHint(g, 'b', false, false), false);
+    assert.equal(canRequestHint(g, null, false, false), false);
+    assert.equal(canRequestHint(g, 'w', true, false), false);
+    assert.equal(canRequestHint(g, 'w', false, true), false);
+    const fen = g.chess.fen();
+    assert.equal(describeHint(fen, 'e2e4'), 'e4 (e2 to e4)');
+    assert.equal(g.chess.fen(), fen);
+    assert.equal(g.plies.length, 0);
+    g.applyMove('e2e4', null, 0);
+    assert.equal(canRequestHint(g, 'w', false, false), false);
+    g.applyMove('e7e5', null, 0);
+    assert.equal(canRequestHint(g, 'w', false, false), true);
+    g.end('1-0', 'puzzle solved', 0);
+    assert.equal(canRequestHint(g, 'w', false, false), false);
+    for (const kind of ['network', 'tournament', 'imported'] as const) {
+        assert.equal(canRequestHint(game(false, kind), 'w', false, false), false);
+    }
+});
+
 test('coach replies must match the recipient, request, game and exact position', () => {
     const g = game();
     const pending = { requestId: 'hint1', gameId: g.id, fen: g.chess.fen() };

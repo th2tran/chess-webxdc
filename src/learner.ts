@@ -36,7 +36,8 @@ export function matchesHintResponse(
 }
 
 export function canRequestHint(g: GameRecord, player: Color | null, reviewing: boolean, aiThinking: boolean): boolean {
-    return g.kind === 'computer' && g.learnerMode && !g.over && player === g.turn && !reviewing && !aiThinking;
+    return (g.kind === 'puzzle' || g.kind === 'computer' && g.learnerMode)
+        && !g.over && player === g.turn && !reviewing && !aiThinking;
 }
 
 export function describeHint(fen: string, uci: string): string | null {
