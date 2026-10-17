@@ -7,8 +7,17 @@ A chess game for [webxdc](https://webxdc.org) messengers such as Vector Chat, wi
 ## Play modes
 
 - **vs Computer** – five strength levels (Beginner → Expert). The engine runs in a Web Worker. If workers are unavailable, a reduced-strength search yields between candidates to keep the interface responsive, with a warning shown in the app. Games are saved locally and support takeback.
+- **Puzzles** – visible only while a live chess coach is available. The bot fetches a random Chess.com puzzle and returns its PGN. You play the side to move from the starting position, following the PGN solution; incorrect moves leave the board unchanged, and the computer automatically plays the solution's replies. Completing the line shows **Puzzle solved!** Puzzles are local, untimed, and do not overwrite your saved computer game. **Next puzzle** requests another random puzzle; repeats are possible.
 - **Network · 2 players** – the **Peers** tab lists everyone who currently has the app open in the chat. Click a peer to challenge them (choose White, Black or random). If they accept, both of you enter a 5+0 game (5 minutes per side). Draw offers, resignation, rematch and spectating ("Watch") are supported.
 - **Network · Tournament** – any peer that is not in a game or tournament can start a 60-minute arena tournament. Connected peers get an invitation; those who accept are added to the roster, which is kept in sync on every device (see **Standings**). Games are 5+0 and players are paired automatically after each game (win 2 points, draw 1, doubled after two wins in a row 🔥). No new games start after 60 minutes; the tournament ends once running games finish.
+
+### Puzzle mode
+
+When Chess Coach is available, the **Puzzles** tab appears in the top menu. Click it to start a random puzzle. The puzzle's starting position and solution are fetched from Chess.com via Chess Coach. You play the side to move from the starting position, following the PGN solution; incorrect moves leave the board unchanged, and the computer automatically plays the solution's replies. Completing the line shows **Puzzle solved!** Puzzles are local, untimed, and do not overwrite your saved computer game. **Next puzzle** requests another random puzzle; repeats are possible.
+
+![XDC-Chess showing the puzzles mode](screenshots/puzzles-mode.png)
+
+Click **Hint** in an unfinished puzzle to ask the Chess Coach for a Stockfish suggestion for the current position. No learner-mode setting is required. The suggestion appears as a blue arrow without playing the move and clears when you advance the puzzle, review history, close it, or load another puzzle. Hints are disabled while reviewing history, while a request is pending, after solving the puzzle, or when the coach is unavailable. Requests share the learner-mode hint protocol, including the puzzle's starting FEN and played move history. A timeout after 30 seconds or a coach error shows a warning; puzzle hints never fall back to the local engine. Stockfish searches independently of the PGN solution, so its suggestion can differ from the move accepted by the puzzle.
 
 ### Learner mode
 ![Chess Learner Mode](screenshots/learner-mode.png)
@@ -19,15 +28,18 @@ The button shows **Finding hint…** while waiting (up to 30 seconds). If the co
 
 ### Chess-coach XDC protocol
 
-When a learner-mode computer game starts, the app sends a lightweight
+On startup, every 15 seconds while connected, and when a computer game starts, the app sends a lightweight
 `coach-probe` with a `requestId`. A connected coach replies with
 `coach-available`, echoing the ID and addressing `to` to the player. A fresh
-reply within 10 seconds triggers a one-time toast: **Chess Coach is available
+reply within 10 seconds makes **Puzzles** visible for 30 seconds (refreshed by subsequent replies).
+For a learner-mode computer-game startup, it also triggers a one-time toast: **Chess Coach is available
 and can provide a suggestion when you request HINT.** This checks the live
-coach service without starting a Stockfish search. No toast is shown for absent
+coach service without starting a Stockfish search. The Puzzles button disappears if fresh replies stop arriving. No toast is shown for absent
 coaches, non-learner games, historical replies or replies for another game start.
 
 Messages use the existing `chess-xdc/1` envelope (`app`, unique `id`, `from`, `name`, `ts` in milliseconds). A `hint-request` contains `requestId`, `gameId`, `fen`, `startFen` and `moves` (UCI strings). A `hint-response` echoes `requestId`, `gameId`, `fen`, adds `to` (the request's `from`), and contains either `uci` or `error`. Retries retain the same request ID. Responses only suggest a move; they never apply it. These application-level addresses correlate replies but do not authenticate the coach on the realtime channel.
+
+A `puzzle-request` contains `requestId` and `gameId`. The coach calls `https://api.chess.com/pub/puzzle/random` with a 10-second timeout and returns a `puzzle-response` with the same IDs, `to`, and either `pgn` or `error`. The app accepts only a live response from the coach that answered its availability probe, addressed to this player and matching the pending request/game IDs. Requests retry every two seconds with the same IDs and time out after 30 seconds with an explicit warning; errors do not fall back to local puzzles. Historical, cancelled and late replies are ignored. The full solution PGN is shared with XDC peers but is not shown in the move list until its moves are played. Puzzles require a starting FEN and a legal, nonempty solution.
 
 The checkbox preference is remembered, and learner mode is retained when a saved computer game is reopened. It is off by default and never enabled for network games, tournaments, or imported PGN reviews.
 

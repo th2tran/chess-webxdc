@@ -13,6 +13,8 @@ export type Payload =
     | { type: 'hello' }
     | { type: 'coach-probe'; requestId: string }
     | { type: 'coach-available'; requestId: string; to: string }
+    | { type: 'puzzle-request'; requestId: string; gameId: string }
+    | { type: 'puzzle-response'; requestId: string; gameId: string; to: string; pgn?: string; error?: string }
     | { type: 'hint-request'; requestId: string; gameId: string; fen: string; startFen: string; moves: string[] }
     | { type: 'hint-response'; requestId: string; gameId: string; fen: string; to: string; uci?: string; error?: string }
     | { type: 'presence'; status: PeerStatus; gameId: string | null; tourId: string | null; opp: string | null }

@@ -12,8 +12,9 @@ import { canMove, canEndGame, canDeclineDraw, validClock, validSync, syncClock, 
 import { importPgn, PgnError } from './pgn.ts';
 import { canRequestHint, describeHint, matchesCoachAvailability, matchesHintResponse, waitForCoachHint } from './learner.ts';
 import { ChatHistory } from './chat.ts';
+import { Puzzle, matchesPuzzleResponse } from './puzzles.ts';
 
-type Mode = 'computer' | 'network' | 'tournament';
+type Mode = 'computer' | 'network' | 'tournament' | 'puzzles';
 type Tab = 'peers' | 'chat' | 'standings';
 
 interface Peer {
@@ -69,7 +70,7 @@ const prefs: Prefs = { muted: false, level: 3, color: 'random', mode: 'computer'
 sounds.muted = prefs.muted;
 
 const S = {
-    mode: prefs.mode as Mode,
+    mode: prefs.mode === 'puzzles' ? 'computer' : prefs.mode as Mode,
     tab: 'peers' as Tab,
     game: null as GameRecord | null,
     viewPly: null as number | null,
@@ -135,7 +136,7 @@ function isBusy(): boolean { return !!myActiveNetworkGame() || inActiveTournamen
 function myStatus(): PeerStatus {
     if (myActiveNetworkGame()) return 'playing';
     if (inActiveTournament()) return 'tournament';
-    if (S.game?.kind === 'computer' && !S.game.over) return 'computer';
+    if ((S.game?.kind === 'computer' || S.game?.kind === 'puzzle') && !S.game.over) return 'computer';
     return 'idle';
 }
 
@@ -190,6 +191,11 @@ function handleMessage(msg: Message, ctx: ReceiveContext): void {
         return;
     }
     if (msg.type === 'hint-request') return;
+    if (msg.type === 'puzzle-request') return;
+    if (msg.type === 'puzzle-response') {
+        if (!ctx.local && !ctx.replay) onPuzzleResponse(msg);
+        return;
+    }
     if (msg.type === 'hint-response') {
         if (!ctx.local && !ctx.replay) onHintResponse(msg);
         return;
@@ -731,7 +737,7 @@ function createTournament(): void {
     if (!net.available) { toast('Tournaments need a webxdc messenger chat.', 'warn'); return; }
     if (isBusy()) { toast('You are already in a game or tournament.', 'warn'); return; }
     if (S.tour && T.isActive(S.tour)) { joinTournament(); return; }
-    if (S.game?.kind === 'computer') S.game = null;
+    if (S.game?.kind === 'computer' || S.game?.kind === 'puzzle') S.game = null;
     S.tour = T.create({ id: randomId('t'), host: me.addr, hostName: me.name, now: now() });
     S.mode = 'tournament';
     S.tab = 'standings';
@@ -748,7 +754,7 @@ function joinTournament(): void {
     if (!t || !T.isActive(t)) { toast('There is no tournament running.', 'warn'); return; }
     if (t.status !== 'running') { toast('The tournament is finishing; no new players.', 'warn'); return; }
     if (myActiveNetworkGame()) { toast('Finish your current game first.', 'warn'); return; }
-    if (S.game?.kind === 'computer' && !S.game.over) S.game = null;
+    if ((S.game?.kind === 'computer' || S.game?.kind === 'puzzle') && !S.game.over) S.game = null;
     S.mode = 'tournament';
     S.tab = 'standings';
     S.joiningTour = t.id;
@@ -892,21 +898,90 @@ function startComputerGame(color: Color | 'random', level: number, restore?: Sav
     maybeAiMove();
 }
 
-let coachProbe: { game: GameRecord; requestId: string; sentAt: number } | null = null;
+let coachProbe: { game?: GameRecord; requestId: string; sentAt: number } | null = null;
+let availableCoach: { addr: string; until: number } | null = null;
 
-function probeChessCoach(game: GameRecord): void {
-    coachProbe = null;
-    if (!net.available || game.over || !game.learnerMode) return;
+function probeChessCoach(game?: GameRecord): void {
+    if (!net.available) return;
     coachProbe = { game, requestId: randomId('coach'), sentAt: now() };
     net.send({ type: 'coach-probe', requestId: coachProbe.requestId });
 }
 
 function onCoachAvailable(msg: MessageOf<'coach-available'>): void {
     const pending = coachProbe;
-    if (!pending || pending.game !== S.game || pending.game.over || !pending.game.learnerMode
-        || !matchesCoachAvailability(msg, pending, me.addr, now())) return;
+    if (!pending || !matchesCoachAvailability(msg, pending, me.addr, now())) return;
+    availableCoach = { addr: msg.from, until: now() + 30_000 };
     coachProbe = null;
-    toast('Chess Coach is available and can provide a suggestion when you request HINT in VS-COMPUTER mode.', 'info', 6000);
+    if (pending.game === S.game && pending.game?.learnerMode && !pending.game.over) {
+        toast('Chess Coach is available and can provide a suggestion when you request HINT in VS-COMPUTER mode.', 'info', 6000);
+    }
+    scheduleRender();
+}
+
+function coachAvailable(): boolean {
+    return !!availableCoach && now() < availableCoach.until;
+}
+
+let puzzle: Puzzle | null = null;
+let puzzleRequest: {
+    requestId: string; gameId: string; coach: string; sentAt: number; cancel: () => void;
+} | null = null;
+
+function cancelPuzzleRequest(): void {
+    puzzleRequest?.cancel();
+    puzzleRequest = null;
+}
+
+function requestPuzzle(): void {
+    if (!coachAvailable()) { toast('Chess coach is not available.', 'warn'); return; }
+    if (isBusy()) { toast('Finish your network game or leave the tournament first.', 'warn'); return; }
+    cancelPuzzleRequest();
+    clearHint();
+    S.aiRequestId++;
+    S.aiThinking = false;
+    S.mode = 'puzzles';
+    S.game = null;
+    S.viewPly = null;
+    puzzle = null;
+    const pending = {
+        requestId: randomId('puzzle-request'), gameId: randomId('puzzle'),
+        coach: availableCoach!.addr, sentAt: now(), cancel: () => {}
+    };
+    puzzleRequest = pending;
+    const send = (): void => {
+        net.send({ type: 'puzzle-request', requestId: pending.requestId, gameId: pending.gameId }, { persist: true });
+    };
+    pending.cancel = waitForCoachHint(() => {
+        net.send({ type: 'puzzle-request', requestId: pending.requestId, gameId: pending.gameId });
+    }, () => {
+        if (puzzleRequest !== pending) return;
+        cancelPuzzleRequest();
+        toast('Chess coach did not return a puzzle. Please try again.', 'warn');
+        render();
+    });
+    send();
+    sendPresence(true);
+    render();
+}
+
+function onPuzzleResponse(msg: MessageOf<'puzzle-response'>): void {
+    const pending = puzzleRequest;
+    if (!pending || S.mode !== 'puzzles' || S.game ||
+        !matchesPuzzleResponse(msg, pending, me.addr, now())) return;
+    cancelPuzzleRequest();
+    try {
+        if (typeof msg.error === 'string') throw new PgnError(`Chess coach: ${msg.error.slice(0, 200)}`);
+        if (typeof msg.pgn !== 'string') throw new PgnError('Chess coach returned no puzzle PGN.');
+        puzzle = new Puzzle(msg.pgn, pending.gameId, me);
+        S.game = puzzle.game;
+        S.flipped = false;
+        toast('Find the next move. The computer will play the puzzle replies.', 'info');
+    } catch (error) {
+        if (!(error instanceof PgnError)) throw error;
+        console.warn('chess: puzzle request failed', error);
+        toast(error.message, 'warn');
+    }
+    render();
 }
 
 function saveComputerGame(): void {
@@ -987,6 +1062,10 @@ function refreshHint(): void {
 function requestHint(): void {
     const g = S.game;
     if (!g || !canRequestHint(g, myColorIn(g), S.viewPly !== null, S.aiThinking)) return;
+    if (g.kind === 'puzzle' && (!net.available || !coachAvailable())) {
+        toast('Chess coach is not available for a puzzle hint. Please try again when it reconnects.', 'warn');
+        return;
+    }
     clearHint();
     const search: NonNullable<typeof hint> = {
         game: g, fen: g.chess.fen(), requestId: randomId('hint'),
@@ -1005,6 +1084,10 @@ function requestHint(): void {
         }, () => {
             refreshHint();
             if (hint !== search) return;
+            if (g.kind === 'puzzle') {
+                failCoachHint('Chess coach did not respond. Please try requesting a puzzle hint again.');
+                return;
+            }
             console.warn('chess: coach hint timed out; using local Expert-level AI');
             toast('Chess coach did not respond. Using local Expert-level AI for this hint.', 'warn', 5000);
             requestLocalHint(search);
@@ -1161,6 +1244,17 @@ function userMove(from: string, to: string, promotion: PieceType | null): void {
     if (g.pending.size) { toast('Waiting for missing moves. Requesting game sync.', 'warn'); requestSync(g); return; }
     const legal = g.chess.movesFrom(from).find((m) => m.to === to && (!m.promotion || m.promotion === (promotion || 'q')));
     if (!legal) return;
+    if (g.kind === 'puzzle') {
+        if (!puzzle || puzzle.game !== g) return;
+        if (!puzzle.play(legal.uci)) {
+            toast('Not the puzzle solution. Try another move.', 'warn');
+        } else {
+            sounds.play(g.over ? 'end' : 'move');
+            if (g.over) toast('Puzzle solved!', 'success');
+        }
+        render();
+        return;
+    }
     if (g.kind === 'computer') {
         if (S.aiThinking) return;
         const rec = g.applyMove(legal.uci, null, now());
@@ -1226,7 +1320,9 @@ function rematch(): void {
 
 function leaveGame(): void {
     const g = S.game;
-    if (g && !g.over && myColorIn(g) && g.kind !== 'computer') return;
+    if (g && !g.over && myColorIn(g) && g.kind !== 'computer' && g.kind !== 'puzzle') return;
+    cancelPuzzleRequest();
+    if (g?.kind === 'puzzle') puzzle = null;
     S.game = null;
     S.viewPly = null;
     if (g?.kind === 'computer') saveJson(STORAGE_COMPUTER, null);
@@ -1344,6 +1440,7 @@ function toggleSound(): void {
 }
 
 function selectMode(mode: Mode): void {
+    if (mode === 'puzzles') { requestPuzzle(); return; }
     if (mode === 'computer') { openComputerSetup(); return; }
     if (!net.available) { toast('Network play needs the app to be shared in a webxdc messenger chat.', 'warn'); return; }
     if (mode === 'network') {
@@ -1425,12 +1522,14 @@ function renderBoard(): void {
 function modeLabel(g: GameRecord | null): string {
     if (!g) return '';
     if (g.kind === 'imported') return `Read-only • <span class="accent">IMPORTED PGN</span>`;
+    if (g.kind === 'puzzle') return `Chess.com random • <span class="accent">PUZZLES</span>`;
     if (g.kind === 'computer') return `Unlimited • Casual • <span class="accent">VS COMPUTER</span>`;
     if (g.kind === 'tournament') return `5+0 • Arena • <span class="accent">TOURNAMENT</span>`;
     return `5+0 • Casual • <span class="accent">NETWORK</span>`;
 }
 
 function gameStatusText(g: GameRecord): string {
+    if (g.kind === 'puzzle') return g.over ? 'Puzzle solved!' : 'Find the next move in the puzzle solution';
     if (g.kind === 'imported' && !g.result) return 'Unfinished game • Review only';
     if (g.over) return describeResult(g.result, g.reason);
     const mine = myColorIn(g);
@@ -1454,6 +1553,7 @@ function renderGameInfo(): void {
             <div class="gi-status">${esc(gameStatusText(g))}</div>`;
     } else {
         const hint = S.mode === 'computer' ? 'Start a game against the computer.'
+            : S.mode === 'puzzles' ? (puzzleRequest ? 'Loading puzzle from chess coach…' : 'Load a random Chess.com puzzle.')
             : S.mode === 'network' ? 'Pick a connected peer to challenge.' : 'Start or join an arena tournament.';
         html += `<div class="gi-head"><div class="gi-icon net"></div><div><div class="gi-mode">Welcome, ${esc(me.name)}</div>
             <div class="gi-time">${esc(hint)}</div></div></div>`;
@@ -1490,6 +1590,7 @@ function playerMeta(g: GameRecord, ref: PlayerRef): string {
         const p = t.players[ref.addr];
         return `${p.streak >= 2 ? '🔥 ' : ''}${p.score} pts`;
     }
+    if (g.kind === 'puzzle') return '';
     if (ref.addr === AI_ADDR) return `Level ${g.level}`;
     return '';
 }
@@ -1563,8 +1664,16 @@ function renderActions(): void {
     let html = '';
     if (!g) {
         if (S.mode === 'computer') html = button('New game vs computer', 'computer-setup', 'primary');
+        else if (S.mode === 'puzzles') html = button(puzzleRequest ? 'Loading puzzle…' : 'Load puzzle', 'puzzle', 'primary', !!puzzleRequest || !coachAvailable());
         else if (S.mode === 'network') html = `<p class="dim center">Choose a peer in the <b>Peers</b> tab to challenge.</p>`;
         else html = tourActionsHtml();
+    } else if (g.kind === 'puzzle') {
+        html = `<p class="dim center">${g.over ? 'Puzzle solved!' : 'Play the solution. Incorrect moves leave the position unchanged.'}</p>`
+            + button('Next puzzle', 'puzzle', 'primary', !coachAvailable()) + button('Close puzzle', 'leave');
+        if (!g.over) {
+            html += button(hint && !hint.move ? 'Finding hint…' : 'Hint', 'hint', 'secondary',
+                !!hint && !hint.move || !coachAvailable() || !canRequestHint(g, mine, S.viewPly !== null, S.aiThinking));
+        }
     } else if (g.kind === 'imported') {
         html = `<p class="dim center">Imported game • Review only</p>${button('Play from here', 'play-from-here', 'primary')}${button('Import another PGN', 'import-pgn')}${button('Close game', 'leave')}`;
     } else if (!mine) {
@@ -1683,7 +1792,7 @@ function renderStandings(): void {
 function renderCrosstable(): void {
     const g = S.game;
     const node = $('#crosstable');
-    if (!g || g.kind === 'computer' || g.kind === 'imported') { node.innerHTML = ''; node.hidden = true; return; }
+    if (!g || g.kind === 'computer' || g.kind === 'imported' || g.kind === 'puzzle') { node.innerHTML = ''; node.hidden = true; return; }
     const a = g.white, b = g.black;
     const games = [...S.games.values()].filter((x) => x.over && x.result && x.reason !== 'aborted'
         && ((x.white.addr === a.addr && x.black.addr === b.addr) || (x.white.addr === b.addr && x.black.addr === a.addr)))
@@ -1704,6 +1813,7 @@ function renderCrosstable(): void {
 function renderModes(): void {
     document.querySelectorAll<HTMLButtonElement>('.modes [data-mode]').forEach((b) => {
         b.classList.toggle('active', b.dataset.mode === S.mode);
+        if (b.dataset.mode === 'puzzles') b.hidden = !coachAvailable();
     });
     const tourBtn = document.querySelector<HTMLElement>('.modes [data-mode=tournament] .mode-badge');
     if (tourBtn) tourBtn.hidden = !(S.tour && T.isActive(S.tour) && !S.tour.players[me.addr]);
@@ -1724,6 +1834,7 @@ function renderNav(): void {
 }
 
 function render(): void {
+    if (puzzleRequest && (S.mode !== 'puzzles' || S.game)) cancelPuzzleRequest();
     refreshHint();
     renderModes();
     renderGameInfo();
@@ -1764,6 +1875,10 @@ function tick(): void {
 }
 
 function slowTick(): void {
+    if (availableCoach && !coachAvailable()) {
+        availableCoach = null;
+        scheduleRender();
+    }
     sendPresence(false);
     tournamentLoop();
     if (!net.replaying) {
@@ -1837,6 +1952,7 @@ function bindEvents(): void {
         else if (e.key === 'f') { S.flipped = !S.flipped; render(); }
     });
     window.addEventListener('pagehide', () => {
+        cancelPuzzleRequest();
         clearHint();
         if (net.hasRealtime) net.send({ type: 'bye' });
         net.leave();
@@ -1859,6 +1975,7 @@ function navigate(nav: string): void {
 function runAction(action: string): void {
     if (action.startsWith('goto-game:')) { watchGame(action.slice('goto-game:'.length)); return; }
     switch (action) {
+        case 'puzzle': requestPuzzle(); break;
         case 'hint': requestHint(); break;
         case 'import-pgn': openPgnImport(); break;
         case 'play-from-here': {
@@ -1917,6 +2034,8 @@ async function main(): Promise<void> {
     if (net.available) {
         net.send({ type: 'hello' });
         sendPresence(true);
+        probeChessCoach(S.game ?? undefined);
+        setInterval(() => probeChessCoach(), 15_000);
     }
     render();
     setInterval(tick, 200);

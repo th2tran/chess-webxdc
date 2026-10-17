@@ -2,7 +2,7 @@
 import { Chess, START_FEN, type Color, type GameResult, type PieceType, type Status } from './engine.ts';
 import type { Clock, PlayerRef } from './net.ts';
 
-export type GameKind = 'computer' | 'network' | 'tournament' | 'imported';
+export type GameKind = 'computer' | 'network' | 'tournament' | 'imported' | 'puzzle';
 
 export interface PlyRecord {
     uci: string;
