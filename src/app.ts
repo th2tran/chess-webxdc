@@ -8,7 +8,7 @@ import * as T from './tournament.ts';
 import { pieceUrl } from './pieces.ts';
 import { $, esc, formatClock, formatDuration, loadJson, Modals, saveJson, Sounds, timeAgo, toast } from './ui.ts';
 import type { AiRequest, AiResponse } from './ai-worker.ts';
-import { canMove, canEndGame, canDeclineDraw, validClock, validSync, syncClock, pruneCompletedGames, MAX_PENDING_MOVES } from './protocol.ts';
+import { canMove, canEndGame, canDeclineDraw, canForfeitOnExit, exitForfeitResult, validClock, validSync, syncClock, pruneCompletedGames, MAX_PENDING_MOVES } from './protocol.ts';
 import { importPgn, PgnError } from './pgn.ts';
 import { canRequestHint, describeHint, matchesCoachAvailability, matchesHintResponse, waitForCoachHint } from './learner.ts';
 import { ChatHistory } from './chat.ts';
@@ -208,7 +208,7 @@ function handleMessage(msg: Message, ctx: ReceiveContext): void {
     switch (msg.type) {
         case 'hello': onHello(msg, ctx); break;
         case 'presence': onPresence(msg, ctx); break;
-        case 'bye': if (!ctx.local) { S.peers.delete(msg.from); scheduleRender(); } break;
+        case 'bye': onBye(msg, ctx); break;
         case 'chat': onChat(msg, ctx); break;
         case 'challenge': onChallenge(msg, ctx); break;
         case 'challenge-cancel': onChallengeCancel(msg, ctx); break;
@@ -224,6 +224,16 @@ function handleMessage(msg: Message, ctx: ReceiveContext): void {
         case 'tjoin': onTournamentJoin(msg, ctx); break;
         case 'tleave': onTournamentLeave(msg, ctx); break;
     }
+}
+
+function onBye(msg: MessageOf<'bye'>, ctx: ReceiveContext): void {
+    if (ctx.local || ctx.replay) return;
+    S.peers.delete(msg.from);
+    const g = typeof msg.gameId === 'string' ? S.games.get(msg.gameId) : undefined;
+    if (g && canForfeitOnExit(g, msg, ctx.replay, now())) {
+        finishGame(g, exitForfeitResult(g, msg.from)!, 'forfeit', { announce: false });
+    }
+    scheduleRender();
 }
 
 function onHello(msg: MessageOf<'hello'>, ctx: ReceiveContext): void {
@@ -1954,7 +1964,12 @@ function bindEvents(): void {
     window.addEventListener('pagehide', () => {
         cancelPuzzleRequest();
         clearHint();
-        if (net.hasRealtime) net.send({ type: 'bye' });
+        const g = myActiveNetworkGame();
+        const result = g ? exitForfeitResult(g, me.addr) : null;
+        if (g && result && !net.replaying) {
+            finishGame(g, result, 'forfeit', { announce: true });
+        }
+        if (net.available) net.send({ type: 'bye', gameId: g?.id ?? null });
         net.leave();
     });
 }

@@ -13,10 +13,22 @@ export function canMove(g: GameRecord, from: string, ply: number): boolean {
     return Number.isSafeInteger(ply) && ply >= 0 && g.colorOf(from) === (ply % 2 === 0 ? 'w' : 'b');
 }
 
+export function exitForfeitResult(g: GameRecord, from: string): GameResult | null {
+    if (g.over || (g.kind !== 'network' && g.kind !== 'tournament')) return null;
+    const color = g.colorOf(from);
+    return color === 'w' ? '0-1' : color === 'b' ? '1-0' : null;
+}
+
+export function canForfeitOnExit(g: GameRecord, msg: MessageOf<'bye'>, replay: boolean, at: number): boolean {
+    return !replay && msg.gameId === g.id && msg.ts >= g.startTs
+        && at - msg.ts <= 60_000 && msg.ts <= at + 5000 && exitForfeitResult(g, msg.from) !== null;
+}
+
 export function canEndGame(g: GameRecord, from: string, result: GameResult, reason: string, at: number): boolean {
     const color = g.colorOf(from);
     if (!color || !['1-0', '0-1', '1/2-1/2'].includes(result)) return false;
     if (reason === 'resignation') return result === (color === 'w' ? '0-1' : '1-0');
+    if (reason === 'forfeit') return result === exitForfeitResult(g, from);
     if (reason === 'agreement') return result === '1/2-1/2' && !!g.drawOffer && g.drawOffer !== from;
     if (reason === 'aborted') return result === '1/2-1/2' && g.plies.length === 0;
     if (reason === 'time out') {

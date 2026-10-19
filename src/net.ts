@@ -18,7 +18,7 @@ export type Payload =
     | { type: 'hint-request'; requestId: string; gameId: string; fen: string; startFen: string; moves: string[] }
     | { type: 'hint-response'; requestId: string; gameId: string; fen: string; to: string; uci?: string; error?: string }
     | { type: 'presence'; status: PeerStatus; gameId: string | null; tourId: string | null; opp: string | null }
-    | { type: 'bye' }
+    | { type: 'bye'; gameId?: string | null }
     | { type: 'chat'; text: string }
     | { type: 'challenge'; cid: string; to: string; color: Color | 'random' }
     | { type: 'challenge-cancel'; cid: string }

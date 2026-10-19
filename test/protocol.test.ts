@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { GameRecord, NETWORK_TC_MS, FLAG_GRACE_MS } from '../src/game.ts';
-import { canMove, canEndGame, canDeclineDraw, validClock, validSync, syncClock, pruneCompletedGames, COMPLETED_GAME_LIMIT } from '../src/protocol.ts';
+import { canMove, canEndGame, canDeclineDraw, canForfeitOnExit, exitForfeitResult, validClock, validSync, syncClock, pruneCompletedGames, COMPLETED_GAME_LIMIT } from '../src/protocol.ts';
 import { APP_ID, type MessageOf } from '../src/net.ts';
 
 function game(id = 'g'): GameRecord {
@@ -81,6 +81,44 @@ test('timeouts require a locally expired clock and the correct winner', () => {
     assert.equal(canEndGame(g, 'black', '0-1', 'time out', NETWORK_TC_MS), false, 'opponent needs grace');
     assert.equal(canEndGame(g, 'black', '0-1', 'time out', NETWORK_TC_MS + FLAG_GRACE_MS), true);
     assert.equal(canEndGame(g, 'black', '1-0', 'time out', NETWORK_TC_MS + FLAG_GRACE_MS), false);
+});
+
+test('explicit exit forfeits either side immediately in network and tournament games only', () => {
+    for (const kind of ['network', 'tournament', 'computer', 'imported', 'puzzle'] as const) {
+        const g = new GameRecord({
+            id: 'g', kind, white: { addr: 'white', name: 'White' }, black: { addr: 'black', name: 'Black' },
+            tc: NETWORK_TC_MS, startTs: 1000
+        });
+        const networked = kind === 'network' || kind === 'tournament';
+        assert.equal(exitForfeitResult(g, 'white'), networked ? '0-1' : null);
+        assert.equal(exitForfeitResult(g, 'black'), networked ? '1-0' : null);
+        assert.equal(exitForfeitResult(g, 'spectator'), null);
+        assert.equal(canEndGame(g, 'white', '0-1', 'forfeit', 1001), networked);
+        assert.equal(canEndGame(g, 'black', '1-0', 'forfeit', 1001), networked);
+        assert.equal(canEndGame(g, 'white', '1-0', 'forfeit', 1001), false);
+        assert.equal(canEndGame(g, 'spectator', '0-1', 'forfeit', 1001), false);
+        g.end('1-0', 'checkmate', 1001);
+        assert.equal(exitForfeitResult(g, 'white'), null);
+    }
+});
+
+test('exit messages must be live, fresh, scoped to this match and sent by a player', () => {
+    const g = game();
+    const msg: MessageOf<'bye'> = {
+        app: APP_ID, id: 'exit', from: 'white', name: 'White', ts: 1000, type: 'bye', gameId: g.id
+    };
+    assert.equal(canForfeitOnExit(g, msg, false, 1001), true);
+    assert.equal(canForfeitOnExit(g, { ...msg, from: 'black' }, false, 1001), true);
+    assert.equal(canForfeitOnExit(g, msg, true, 1001), false);
+    assert.equal(canForfeitOnExit(g, msg, false, 61_001), false);
+    for (const patch of [
+        { from: 'spectator' }, { gameId: 'old-game' }, { gameId: undefined },
+        { gameId: null }, { ts: -1 }, { ts: 10_000 }
+    ]) assert.equal(canForfeitOnExit(g, { ...msg, ...patch }, false, 1001), false);
+    assert.ok(g.applyMove('e2e4', null, 1001));
+    assert.equal(canForfeitOnExit(g, msg, false, 1002), true, 'exit also forfeits when it is not the departing player’s turn');
+    g.end('0-1', 'forfeit', 1002);
+    assert.equal(canForfeitOnExit(g, msg, false, 1003), false);
 });
 
 test('claimed board results must match the actual position', () => {
