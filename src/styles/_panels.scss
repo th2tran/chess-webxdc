@@ -164,14 +164,17 @@
 .pocket {
     display: flex;
     align-items: center;
+    gap: 2px;
     height: 36px;
     margin: 6px 0;
     .pocket-piece {
         position: relative;
         width: 34px;
         height: 34px;
+        border-radius: 3px;
+        background-color: #c8b89d;
         background-size: cover;
-        &.empty { opacity: .15; }
+        &.empty { opacity: .45; }
     }
     .count {
         position: absolute;
