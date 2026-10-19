@@ -137,10 +137,15 @@ export function adjudicateStale(t: TournamentState, now: number): boolean {
 
 export function ongoingGames(t: TournamentState): TGame[] { return Object.values(t.games).filter((g) => !g.result); }
 
-/** Advances running -> finishing -> finished. Returns true if the status changed. */
-export function updateStatus(t: TournamentState, now: number): boolean {
+/** Advances the lifecycle, including early completion when no further match is possible. */
+export function updateStatus(t: TournamentState, now: number, online?: Set<string>): boolean {
     const before = t.status;
     if (t.status === 'running' && now >= endTs(t)) t.status = 'finishing';
+    if (t.status === 'running' && online && Object.keys(t.games).length > 0
+        && ongoingGames(t).length === 0
+        && Object.values(t.players).filter(p => !p.withdrawn && online.has(p.addr)).length < 2) {
+        t.status = 'finished';
+    }
     if (t.status === 'finishing' && ongoingGames(t).length === 0) t.status = 'finished';
     if (t.status !== before) { t.rev++; return true; }
     return false;

@@ -816,11 +816,12 @@ function tournamentLoop(): void {
     const ts = now();
     if (t.host === me.addr) {
         if (t.status === 'finished') return;
-        let changed = T.updateStatus(t, ts);
+        const online = onlineSet();
+        let changed = T.updateStatus(t, ts, online);
         changed = T.adjudicateStale(t, ts) || changed;
-        changed = T.updateStatus(t, ts) || changed;
+        changed = T.updateStatus(t, ts, online) || changed;
         reconcileTournamentGames(t, false);
-        for (const pair of T.pairings(t, ts, onlineSet())) {
+        for (const pair of T.pairings(t, ts, online)) {
             const gameId = randomId('g');
             T.startGame(t, gameId, pair.white, pair.black, ts);
             changed = true;

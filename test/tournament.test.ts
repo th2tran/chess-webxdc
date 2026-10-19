@@ -81,6 +81,42 @@ test('pickNewer keeps the highest revision and converges on one tournament', () 
     assert.strictEqual(T.pickNewer(later, a), a);
 });
 
+test('tournament finishes early after play when fewer than two reachable participants remain', () => {
+    for (const remaining of [new Set<string>(), new Set(['a@x']), new Set(['outsider'])]) {
+        const t = setup(2);
+        T.startGame(t, 'g', 'a@x', 'b@x', 1000);
+        T.applyResult(t, 'g', '1-0', 'forfeit', 2000);
+        const rev = t.rev;
+        assert.ok(T.updateStatus(t, 2001, remaining));
+        assert.strictEqual(t.status, 'finished');
+        assert.strictEqual(t.rev, rev + 1);
+        assert.ok(2001 < T.endTs(t));
+        assert.deepStrictEqual(T.pairings(t, 2001, remaining), []);
+        assert.strictEqual(T.updateStatus(t, 2002, remaining), false);
+        assert.strictEqual(t.players['a@x'].score, 2, 'existing scores are retained');
+    }
+    const t = setup(2);
+    T.startGame(t, 'g', 'a@x', 'b@x', 1000);
+    T.applyResult(t, 'g', '1-0', 'checkmate', 2000);
+    T.withdraw(t, 'b@x');
+    assert.ok(T.updateStatus(t, 2001, new Set(['a@x', 'b@x'])));
+    assert.strictEqual(t.status, 'finished', 'withdrawn players cannot keep the tournament running');
+});
+
+test('early completion preserves initial waiting, running matches, rest periods and rematches', () => {
+    const t = setup(2);
+    const online = new Set(['a@x', 'b@x']);
+    assert.strictEqual(T.updateStatus(t, 1000, new Set(['a@x'])), false, 'wait for initial participants');
+    T.startGame(t, 'g', 'a@x', 'b@x', 1000);
+    assert.strictEqual(T.updateStatus(t, 2000, new Set(['a@x'])), false, 'do not end ongoing matches');
+    T.applyResult(t, 'g', '1-0', 'checkmate', 3000);
+    assert.deepStrictEqual(T.pairings(t, 3001, online), [], 'both players are resting');
+    assert.strictEqual(T.updateStatus(t, 3001, online), false, 'rest is not a reason to finish');
+    assert.strictEqual(T.updateStatus(t, 3001), false, 'unknown presence does not trigger early completion');
+    assert.strictEqual(T.pairings(t, 3000 + T.REST_MS, online).length, 1, 'rematches remain possible');
+    assert.strictEqual(t.status, 'running');
+});
+
 test('only the host can publish state, regardless of revision', () => {
     const t = setup(3);
     const incoming = T.clone(t);
