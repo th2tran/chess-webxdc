@@ -1,7 +1,7 @@
 {
   "name": "chess-webxdc",
-  "version": "0.6.1+36",
-  "description": "Chess for webxdc: play the computer, challenge chat peers, or run a 60-minute arena tournament",
+  "version": "0.6.2+39",
+  "description": "Chess for webxdc: play the computer, challenge chat peers, or run a 15-60 minute arena tournament",
   "keywords": [
     "chess",
     "webxdc"

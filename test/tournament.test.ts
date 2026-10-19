@@ -20,6 +20,22 @@ test('create/join/withdraw bump revision and roster', () => {
     assert.strictEqual(t.players['c@x'].withdrawn, false);
 });
 
+test('selectable durations control the deadline and preserve the default', () => {
+    assert.strictEqual(T.create({ id: 'default', host: 'a', hostName: 'A', now: 1000 }).durationMs, 60 * 60000);
+    for (const minutes of [15, 30, 45, 60]) {
+        assert.strictEqual(T.validDurationMinutes(minutes), true);
+        const t = T.create({ id: 't', host: 'a', hostName: 'A', now: 1000, durationMs: minutes * 60000 });
+        assert.strictEqual(T.endTs(t), 1000 + minutes * 60000);
+        assert.strictEqual(T.updateStatus(t, T.endTs(t) - 1), false);
+        assert.strictEqual(T.clone(t).durationMs, minutes * 60000);
+        assert.strictEqual(T.updateStatus(t, T.endTs(t)), true);
+        assert.strictEqual(t.status, 'finished');
+    }
+    for (const value of [undefined, null, '30', 0, 20, 90, NaN, Infinity]) {
+        assert.strictEqual(T.validDurationMinutes(value), false);
+    }
+});
+
 test('pairing pairs idle online players, balances colours and avoids immediate rematches', () => {
     const t = setup(4);
     const online = new Set(Object.keys(t.players));

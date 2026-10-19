@@ -1,5 +1,5 @@
 name = "XDC-Chess"
-description = "Play chess against the computer, challenge peers in the chat, or run a 60-minute arena tournament."
+description = "Play chess against the computer, challenge peers in the chat, or run a 15-60 minute arena tournament."
 source_code_url = "https://github.com/th2tran/chess-webxdc"
 icon = "icon.png"
-version = "0.6.1+36"
+version = "0.6.2+39"

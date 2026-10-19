@@ -4,6 +4,12 @@
 import type { GameResult } from './engine.ts';
 
 export const DEFAULT_DURATION_MS = 60 * 60 * 1000;
+export const DURATION_MINUTES = [15, 30, 45, 60] as const;
+
+export function validDurationMinutes(value: unknown): value is number {
+    return typeof value === 'number' && DURATION_MINUTES.some(minutes => minutes === value);
+}
+
 export const REST_MS = 6000;               // pause after a game before a player is paired again
 export const MAX_GAME_MS = 12 * 60 * 1000; // a 5+0 game can never legitimately last longer than ~10 minutes
 

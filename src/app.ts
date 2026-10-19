@@ -50,7 +50,7 @@ interface SavedComputerGame {
     startFen?: string;
 }
 
-interface Prefs { muted: boolean; level: number; color: Color | 'random'; mode: Mode; learnerMode: boolean; }
+interface Prefs { muted: boolean; level: number; color: Color | 'random'; mode: Mode; learnerMode: boolean; tournamentMinutes: number; }
 
 const CHALLENGE_TTL_MS = 60000;
 const SYNC_RETRY_MS = 5000;
@@ -66,7 +66,8 @@ const modals = new Modals($('#modal-root'));
 const appStart = Date.now();
 const chat = new ChatHistory();
 
-const prefs: Prefs = { muted: false, level: 3, color: 'random', mode: 'computer', learnerMode: false, ...loadJson<Partial<Prefs>>(STORAGE_PREFS, {}) };
+const prefs: Prefs = { muted: false, level: 3, color: 'random', mode: 'computer', learnerMode: false, tournamentMinutes: 60, ...loadJson<Partial<Prefs>>(STORAGE_PREFS, {}) };
+if (!T.validDurationMinutes(prefs.tournamentMinutes)) prefs.tournamentMinutes = 60;
 sounds.muted = prefs.muted;
 
 const S = {
@@ -733,7 +734,7 @@ function inviteToTournament(t: T.TournamentState): void {
     modals.show({
         id: `tour-invite-${t.id}`,
         title: 'Tournament invitation',
-        body: `<p><b>${esc(host)}</b> invites you to <b>${esc(t.name)}</b>, a 60-minute arena tournament with 5+0 games.</p>
+        body: `<p><b>${esc(host)}</b> invites you to <b>${esc(t.name)}</b>, a ${t.durationMs / 60000}-minute arena tournament with 5+0 games.</p>
             <p class="dim">${count} player${count === 1 ? '' : 's'} so far • ${formatDuration(T.endTs(t) - now())} left</p>`,
         dismissible: false,
         buttons: [
@@ -743,17 +744,20 @@ function inviteToTournament(t: T.TournamentState): void {
     });
 }
 
-function createTournament(): void {
+function createTournament(minutes: number): void {
+    if (!T.validDurationMinutes(minutes)) { toast('Choose a tournament duration of 15, 30, 45, or 60 minutes.', 'warn'); return; }
     if (!net.available) { toast('Tournaments need a webxdc messenger chat.', 'warn'); return; }
     if (isBusy()) { toast('You are already in a game or tournament.', 'warn'); return; }
     if (S.tour && T.isActive(S.tour)) { joinTournament(); return; }
     if (S.game?.kind === 'computer' || S.game?.kind === 'puzzle') S.game = null;
-    S.tour = T.create({ id: randomId('t'), host: me.addr, hostName: me.name, now: now() });
+    prefs.tournamentMinutes = minutes;
+    savePrefs();
+    S.tour = T.create({ id: randomId('t'), host: me.addr, hostName: me.name, now: now(), durationMs: minutes * 60000 });
     S.mode = 'tournament';
     S.tab = 'standings';
     const notify: Record<string, string> = {};
     for (const p of onlinePeers()) notify[p.addr] = `${me.name} invites you to a chess tournament`;
-    broadcastTour(true, { info: `🏆 ${me.name} started a 60-minute chess tournament. Open Chess to join!`, notify });
+    broadcastTour(true, { info: `🏆 ${me.name} started a ${minutes}-minute chess tournament. Open Chess to join!`, notify });
     sendPresence(true);
     toast('Tournament created. Waiting for players to join…', 'success');
     render();
@@ -1471,7 +1475,7 @@ function selectMode(mode: Mode): void {
         if (!p || p.withdrawn) {
             modals.show({
                 id: 'tour-join', title: t.name, dismissible: true,
-                body: `<p>A 60-minute arena tournament is running (${Object.values(t.players).filter((x) => !x.withdrawn).length} players, ${formatDuration(T.endTs(t) - now())} left).</p>`,
+                body: `<p>A ${t.durationMs / 60000}-minute arena tournament is running (${Object.values(t.players).filter((x) => !x.withdrawn).length} players, ${formatDuration(T.endTs(t) - now())} left).</p>`,
                 buttons: [{ label: 'Close', kind: 'secondary' }, { label: p ? 'Rejoin' : 'Join tournament', kind: 'primary', action: () => joinTournament() }]
             });
         }
@@ -1480,10 +1484,28 @@ function selectMode(mode: Mode): void {
     } else {
         modals.show({
             id: 'tour-create', title: 'Start a tournament', dismissible: true,
-            body: `<p>Start a <b>60-minute arena</b> tournament. All connected peers are invited.</p>
+            body: `<p>Start an arena tournament. All connected peers are invited.</p>
+                <label class="field-label" for="tournament-duration">Tournament duration</label>
+                <select id="tournament-duration" class="duration-select">${T.DURATION_MINUTES.map(minutes =>
+                    `<option value="${minutes}" ${prefs.tournamentMinutes === minutes ? 'selected' : ''}>${minutes} minutes</option>`).join('')}</select>
                 <ul class="rules"><li>Each game is 5+0 (5 minutes per side).</li><li>Players are paired again automatically after each game.</li>
                 <li>Win = 2 points, draw = 1. After two wins in a row, points are doubled 🔥.</li></ul>`,
-            buttons: [{ label: 'Cancel', kind: 'secondary' }, { label: 'Start tournament', kind: 'primary', action: () => createTournament() }]
+            buttons: [{ label: 'Cancel', kind: 'secondary' }, {
+                label: 'Start tournament', kind: 'primary', action: (dialog) =>
+                    createTournament(Number(dialog.querySelector<HTMLSelectElement>('#tournament-duration')!.value))
+            }],
+            onOpen: (dialog) => {
+                const select = dialog.querySelector<HTMLSelectElement>('#tournament-duration')!;
+                select.addEventListener('change', () => {
+                    const minutes = Number(select.value);
+                    if (!T.validDurationMinutes(minutes)) {
+                        toast('Choose a tournament duration of 15, 30, 45, or 60 minutes.', 'warn');
+                        return;
+                    }
+                    prefs.tournamentMinutes = minutes;
+                    savePrefs();
+                });
+            }
         });
     }
     render();

@@ -9,7 +9,7 @@ A chess game for [webxdc](https://webxdc.org) messengers such as Vector Chat, wi
 - **vs Computer** – five strength levels (Beginner → Expert). The engine runs in a Web Worker. If workers are unavailable, a reduced-strength search yields between candidates to keep the interface responsive, with a warning shown in the app. Games are saved locally and support takeback.
 - **Puzzles** – visible only while a live chess coach is available. The bot fetches a random Chess.com puzzle and returns its PGN. You play the side to move from the starting position, following the PGN solution; incorrect moves leave the board unchanged, and the computer automatically plays the solution's replies. Completing the line shows **Puzzle solved!** Puzzles are local, untimed, and do not overwrite your saved computer game. **Next puzzle** requests another random puzzle; repeats are possible.
 - **Network · 2 players** – the **Peers** tab lists everyone who currently has the app open in the chat. Click a peer to challenge them (choose White, Black or random). If they accept, both of you enter a 5+0 game (5 minutes per side). Draw offers, resignation, rematch and spectating ("Watch") are supported.
-- **Network · Tournament** – any peer that is not in a game or tournament can start a 60-minute arena tournament. Connected peers get an invitation; those who accept are added to the roster, which is kept in sync on every device (see **Standings**). Games are 5+0 and players are paired automatically after each game (win 2 points, draw 1, doubled after two wins in a row 🔥). No new games start after 60 minutes; the tournament ends once running games finish.
+- **Network · Tournament** – any peer that is not in a game or tournament can start an arena tournament. Choose **15, 30, 45, or 60 minutes** in the duration dropdown (60 by default). The selection is saved locally for this peer, including across app restarts, and preselected next time. Connected peers get an invitation showing the chosen duration; those who accept are added to the roster, which is kept in sync on every device (see **Standings**). Games are 5+0 and players are paired automatically after each game (win 2 points, draw 1, doubled after two wins in a row 🔥). No new games start after the selected duration; the tournament ends once running games finish, or earlier when no further match is possible.
 
 ### Puzzle mode
 
@@ -44,6 +44,8 @@ A `puzzle-request` contains `requestId` and `gameId`. The coach calls `https://a
 The checkbox preference is remembered, and learner mode is retained when a saved computer game is reopened. It is off by default and never enabled for network games, tournaments, or imported PGN reviews.
 
 ## How networking works
+
+Local preferences and saved games use the host's `localStorage`. If loading or saving fails, the app logs the error and displays a warning rather than silently ignoring it. Preferences are scoped to the host's app storage; a new app instance or cleared storage may start with defaults.
 
 - Messages go over the webxdc realtime channel (`joinRealtimeChannel`) for presence and fast delivery, and important events (challenges, game starts, moves, results, tournament state) are also sent with `sendUpdate` so they survive restarts and reach peers without realtime support.
 - When the app is reopened, it replays the stored updates and resumes any unfinished game.

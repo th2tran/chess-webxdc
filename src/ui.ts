@@ -208,11 +208,24 @@ export class Sounds {
     }
 }
 
+const storageWarnings = new Set<string>();
+
+function reportStorageError(operation: 'load' | 'save', key: string, error: unknown): void {
+    console.warn(`chess: failed to ${operation} local data (${key})`, error);
+    if (storageWarnings.has(operation)) return;
+    storageWarnings.add(operation);
+    toast(operation === 'load'
+        ? 'Could not restore local settings or saved data. Defaults will be used where needed.'
+        : 'Could not save local settings or game data. Changes may be lost when the app closes.',
+    'warn', 8000);
+}
+
 export function loadJson<T>(key: string, fallback: T): T {
     try {
         const raw = localStorage.getItem(key);
         return raw ? JSON.parse(raw) as T : fallback;
-    } catch {
+    } catch (error) {
+        reportStorageError('load', key, error);
         return fallback;
     }
 }
@@ -221,7 +234,7 @@ export function saveJson(key: string, value: unknown): void {
     try {
         if (value === null) localStorage.removeItem(key);
         else localStorage.setItem(key, JSON.stringify(value));
-    } catch {
-        // Storage may be unavailable.
+    } catch (error) {
+        reportStorageError('save', key, error);
     }
 }
