@@ -285,6 +285,15 @@
     p { width: 100%; margin: 2px 0; }
     .offer { color: $text-strong; }
     .waiting { color: $text; }
+    .puzzle-type-select {
+        display: inline-block;
+        width: auto;
+        max-width: 100%;
+        margin: 0;
+        padding-top: 6px;
+        padding-bottom: 6px;
+        &:disabled { opacity: .6; }
+    }
 }
 
 @media (max-width: $mobile) {

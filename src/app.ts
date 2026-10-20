@@ -12,7 +12,7 @@ import { canMove, canEndGame, canDeclineDraw, canForfeitOnExit, exitForfeitResul
 import { importPgn, PgnError } from './pgn.ts';
 import { canRequestHint, describeHint, matchesCoachAvailability, matchesHintResponse, waitForCoachHint } from './learner.ts';
 import { ChatHistory } from './chat.ts';
-import { Puzzle, matchesPuzzleResponse } from './puzzles.ts';
+import { PUZZLE_TYPES, Puzzle, matchesPuzzleResponse, puzzleContinuation, puzzleThemeLabel, validPuzzleType } from './puzzles.ts';
 
 type Mode = 'computer' | 'network' | 'tournament' | 'puzzles';
 type Tab = 'peers' | 'chat' | 'standings';
@@ -50,7 +50,7 @@ interface SavedComputerGame {
     startFen?: string;
 }
 
-interface Prefs { muted: boolean; level: number; color: Color | 'random'; mode: Mode; learnerMode: boolean; tournamentMinutes: number; }
+interface Prefs { muted: boolean; level: number; color: Color | 'random'; mode: Mode; learnerMode: boolean; tournamentMinutes: number; puzzleType: string; }
 
 const CHALLENGE_TTL_MS = 60000;
 const SYNC_RETRY_MS = 5000;
@@ -66,8 +66,9 @@ const modals = new Modals($('#modal-root'));
 const appStart = Date.now();
 const chat = new ChatHistory();
 
-const prefs: Prefs = { muted: false, level: 3, color: 'random', mode: 'computer', learnerMode: false, tournamentMinutes: 60, ...loadJson<Partial<Prefs>>(STORAGE_PREFS, {}) };
+const prefs: Prefs = { muted: false, level: 3, color: 'random', mode: 'computer', learnerMode: false, tournamentMinutes: 60, puzzleType: '', ...loadJson<Partial<Prefs>>(STORAGE_PREFS, {}) };
 if (!T.validDurationMinutes(prefs.tournamentMinutes)) prefs.tournamentMinutes = 60;
+if (!validPuzzleType(prefs.puzzleType)) prefs.puzzleType = '';
 sounds.muted = prefs.muted;
 
 const S = {
@@ -888,7 +889,7 @@ function computerRef(level: number): PlayerRef {
 }
 
 function startComputerGame(color: Color | 'random', level: number, restore?: SavedComputerGame, startFen?: string): void {
-    const myColor: Color = restore ? restore.myColor : startFen ? new Chess(startFen).turnColor()
+    const myColor: Color = restore ? restore.myColor : startFen && color === 'random' ? new Chess(startFen).turnColor()
         : color === 'random' ? (Math.random() < 0.5 ? 'w' : 'b') : color;
     const ai = computerRef(level);
     const g = new GameRecord({
@@ -900,6 +901,9 @@ function startComputerGame(color: Color | 'random', level: number, restore?: Sav
         for (const uci of restore.moves) if (!g.applyMove(uci, null, now())) break;
         if (restore.result) g.end(restore.result, restore.reason || '', now());
     }
+    cancelPuzzleRequest();
+    clearHint();
+    puzzle = null;
     S.game = g;
     S.viewPly = null;
     S.flipped = false;
@@ -947,6 +951,13 @@ function cancelPuzzleRequest(): void {
     puzzleRequest = null;
 }
 
+function continuePuzzle(): void {
+    const position = S.game && puzzleContinuation(S.game, me.addr);
+    if (!position || S.viewPly !== null) return;
+    if (isBusy()) { toast('Finish your network game or leave the tournament first.', 'warn'); return; }
+    openComputerSetup(position.startFen, { color: position.color, level: 5 });
+}
+
 function requestPuzzle(): void {
     if (!coachAvailable()) { toast('Chess coach is not available.', 'warn'); return; }
     if (isBusy()) { toast('Finish your network game or leave the tournament first.', 'warn'); return; }
@@ -963,15 +974,19 @@ function requestPuzzle(): void {
         coach: availableCoach!.addr, sentAt: now(), cancel: () => {}
     };
     puzzleRequest = pending;
+    const payload = {
+        type: 'puzzle-request' as const, requestId: pending.requestId, gameId: pending.gameId,
+        ...(prefs.puzzleType && { puzzleType: prefs.puzzleType })
+    };
     const send = (): void => {
-        net.send({ type: 'puzzle-request', requestId: pending.requestId, gameId: pending.gameId }, { persist: true });
+        net.send(payload, { persist: true });
     };
     pending.cancel = waitForCoachHint(() => {
-        net.send({ type: 'puzzle-request', requestId: pending.requestId, gameId: pending.gameId });
+        net.send(payload);
     }, () => {
         if (puzzleRequest !== pending) return;
         cancelPuzzleRequest();
-        toast('Chess coach did not return a puzzle. Please try again.', 'warn');
+        toast('Chess coach did not return a puzzle within 30 seconds. Its Lichess database may still be downloading or preparing. Please try again later.', 'warn');
         render();
     });
     send();
@@ -987,7 +1002,7 @@ function onPuzzleResponse(msg: MessageOf<'puzzle-response'>): void {
     try {
         if (typeof msg.error === 'string') throw new PgnError(`Chess coach: ${msg.error.slice(0, 200)}`);
         if (typeof msg.pgn !== 'string') throw new PgnError('Chess coach returned no puzzle PGN.');
-        puzzle = new Puzzle(msg.pgn, pending.gameId, me);
+        puzzle = new Puzzle(msg.pgn, pending.gameId, me, now(), msg.themes);
         S.game = puzzle.game;
         S.flipped = false;
         toast('Find the next move. The computer will play the puzzle replies.', 'info');
@@ -1204,20 +1219,22 @@ function onAiResponse(res: AiResponse): void {
     render();
 }
 
-function openComputerSetup(startFen?: string): void {
+function openComputerSetup(startFen?: string, options: { color?: Color; level?: number } = {}): void {
     if (myActiveNetworkGame()) { toast('Finish your current network game first.', 'warn'); return; }
     const position = startFen ? new Chess(startFen) : null;
     if (position?.status().over) { toast('This position is already finished. Choose an earlier position to play from.', 'warn'); return; }
+    const color = options.color ?? position?.turnColor();
+    const level = options.level ?? prefs.level;
     modals.show({
         id: 'computer-setup',
         title: 'Play against the computer',
         dismissible: true,
         body: `<div class="field-label">Strength</div>
             <div class="choice-row levels">${[1, 2, 3, 4, 5].map((l) => `<label class="choice">
-                <input type="radio" name="level" value="${l}" ${prefs.level === l ? 'checked' : ''}>
+                <input type="radio" name="level" value="${l}" ${level === l ? 'checked' : ''}>
                 <span class="level-chip" title="${LEVEL_NAMES[l]}">${l}</span></label>`).join('')}</div>
             <div class="dim level-name"></div>
-            ${position ? `<p>You play ${position.turnColor() === 'w' ? 'White' : 'Black'} and move first from the displayed position.</p>` : `<div class="field-label">Your color</div>
+            ${position ? `<p>You play ${color === 'w' ? 'White' : 'Black'}. ${position.turnColor() === color ? 'You move' : 'The computer moves'} first from the displayed position.</p>` : `<div class="field-label">Your color</div>
             <div class="choice-row">${(['w', 'random', 'b'] as const).map((c) => `<label class="choice">
                 <input type="radio" name="color" value="${c}" ${prefs.color === c ? 'checked' : ''}>
                 <span class="color-chip ${c}">${c === 'w' ? 'White' : c === 'b' ? 'Black' : 'Random'}</span></label>`).join('')}</div>`}
@@ -1234,7 +1251,7 @@ function openComputerSetup(startFen?: string): void {
                     prefs.mode = 'computer';
                     prefs.learnerMode = dialog.querySelector<HTMLInputElement>('input[name=learner-mode]')?.checked === true;
                     savePrefs();
-                    startComputerGame(prefs.color, prefs.level, undefined, startFen);
+                    startComputerGame(color ?? prefs.color, prefs.level, undefined, startFen);
                 }
             }
         ],
@@ -1555,7 +1572,10 @@ function renderBoard(): void {
 function modeLabel(g: GameRecord | null): string {
     if (!g) return '';
     if (g.kind === 'imported') return `Read-only • <span class="accent">IMPORTED PGN</span>`;
-    if (g.kind === 'puzzle') return `Chess.com random • <span class="accent">PUZZLES</span>`;
+    if (g.kind === 'puzzle') {
+        const themes = g.pgnTags.Themes?.split(/\s+/).map(puzzleThemeLabel).join(' · ');
+        return `Lichess random • <span class="accent">PUZZLES</span>${themes ? `<br>${esc(themes)}` : ''}`;
+    }
     if (g.kind === 'computer') return `Unlimited • Casual • <span class="accent">VS COMPUTER</span>`;
     if (g.kind === 'tournament') return `5+0 • Arena • <span class="accent">TOURNAMENT</span>`;
     return `5+0 • Casual • <span class="accent">NETWORK</span>`;
@@ -1586,7 +1606,7 @@ function renderGameInfo(): void {
             <div class="gi-status">${esc(gameStatusText(g))}</div>`;
     } else {
         const hint = S.mode === 'computer' ? 'Start a game against the computer.'
-            : S.mode === 'puzzles' ? (puzzleRequest ? 'Loading puzzle from chess coach…' : 'Load a random Chess.com puzzle.')
+            : S.mode === 'puzzles' ? (puzzleRequest ? 'Loading Lichess puzzle from chess coach…' : 'Load a random Lichess puzzle.')
             : S.mode === 'network' ? 'Pick a connected peer to challenge.' : 'Start or join an arena tournament.';
         html += `<div class="gi-head"><div class="gi-icon net"></div><div><div class="gi-mode">Welcome, ${esc(me.name)}</div>
             <div class="gi-time">${esc(hint)}</div></div></div>`;
@@ -1691,18 +1711,29 @@ function button(label: string, action: string, kind = 'secondary', disabled = fa
     return `<button class="btn ${kind}" data-action="${action}" ${disabled ? 'disabled' : ''}>${esc(label)}</button>`;
 }
 
+function puzzleTypeSelect(disabled: boolean): string {
+    return `<select class="duration-select puzzle-type-select" data-puzzle-type aria-label="Puzzle type" ${disabled ? 'disabled' : ''}>${
+        PUZZLE_TYPES.map((t) => `<option value="${esc(t.value)}" ${prefs.puzzleType === t.value ? 'selected' : ''}>${esc(t.label)}</option>`).join('')}</select>`;
+}
+
+let lastActionsHtml: string | null = null;
+
 function renderActions(): void {
     const g = S.game;
     const mine = myColorIn(g);
     let html = '';
     if (!g) {
         if (S.mode === 'computer') html = button('New game vs computer', 'computer-setup', 'primary');
-        else if (S.mode === 'puzzles') html = button(puzzleRequest ? 'Loading puzzle…' : 'Load puzzle', 'puzzle', 'primary', !!puzzleRequest || !coachAvailable());
+        else if (S.mode === 'puzzles') html = puzzleTypeSelect(!!puzzleRequest)
+            + button(puzzleRequest ? 'Loading puzzle…' : 'Load puzzle', 'puzzle', 'primary', !!puzzleRequest || !coachAvailable());
         else if (S.mode === 'network') html = `<p class="dim center">Choose a peer in the <b>Peers</b> tab to challenge.</p>`;
         else html = tourActionsHtml();
     } else if (g.kind === 'puzzle') {
         html = `<p class="dim center">${g.over ? 'Puzzle solved!' : 'Play the solution. Incorrect moves leave the position unchanged.'}</p>`
-            + button('Next puzzle', 'puzzle', 'primary', !coachAvailable()) + button('Close puzzle', 'leave');
+            + puzzleTypeSelect(false) + button('Next puzzle', 'puzzle', 'primary', !coachAvailable()) + button('Close puzzle', 'leave');
+        if (puzzleContinuation(g, me.addr)) {
+            html += button('CONTINUE PLAYING', 'puzzle-continue', 'primary', S.viewPly !== null || isBusy());
+        }
         if (!g.over) {
             html += button(hint && !hint.move ? 'Finding hint…' : 'Hint', 'hint', 'secondary',
                 !!hint && !hint.move || !coachAvailable() || !canRequestHint(g, mine, S.viewPly !== null, S.aiThinking));
@@ -1732,6 +1763,9 @@ function renderActions(): void {
     } else {
         html = tourActionsHtml();
     }
+    // Skip identical re-renders so an open puzzle-type dropdown isn't closed by unrelated updates.
+    if (html === lastActionsHtml) return;
+    lastActionsHtml = html;
     $('#actions').innerHTML = html;
 }
 
@@ -1964,6 +1998,12 @@ function bindEvents(): void {
         S.viewPly = ply === S.game.plies.length ? null : ply;
         render();
     });
+    $('#actions').addEventListener('change', (e) => {
+        const select = (e.target as HTMLElement).closest<HTMLSelectElement>('select[data-puzzle-type]');
+        if (!select || !validPuzzleType(select.value)) return;
+        prefs.puzzleType = select.value;
+        savePrefs();
+    });
     document.addEventListener('click', (e) => {
         const target = e.target as HTMLElement;
         const action = target.closest<HTMLElement>('[data-action]')?.dataset.action;
@@ -1977,7 +2017,7 @@ function bindEvents(): void {
         }
     });
     document.addEventListener('keydown', (e) => {
-        if ((e.target as HTMLElement).closest('input, textarea') || document.querySelector('.modal')) return;
+        if ((e.target as HTMLElement).closest('input, textarea, select') || document.querySelector('.modal')) return;
         if (e.key === 'ArrowLeft') navigate('prev');
         else if (e.key === 'ArrowRight') navigate('next');
         else if (e.key === 'ArrowUp' || e.key === 'Home') navigate('first');
@@ -2014,6 +2054,7 @@ function runAction(action: string): void {
     if (action.startsWith('goto-game:')) { watchGame(action.slice('goto-game:'.length)); return; }
     switch (action) {
         case 'puzzle': requestPuzzle(); break;
+        case 'puzzle-continue': continuePuzzle(); break;
         case 'hint': requestHint(); break;
         case 'import-pgn': openPgnImport(); break;
         case 'play-from-here': {
