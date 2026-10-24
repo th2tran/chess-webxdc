@@ -14,6 +14,7 @@ export interface PlyRecord {
     fen: string;
     check: boolean;
     clock: Clock | null;
+    comments?: string[];
 }
 
 export interface GameInit {
@@ -61,6 +62,7 @@ export class GameRecord {
     readonly chess: Chess;
     readonly startFen: string;
     plies: PlyRecord[] = [];
+    initialComments: string[] = [];
     clock: Clock;
     turnStart: number;
     over = false;
@@ -180,6 +182,11 @@ export class GameRecord {
         return this.plies[Math.min(ply, this.plies.length) - 1].fen;
     }
 
+    commentsAt(ply: number): readonly string[] {
+        if (ply <= 0) return this.initialComments;
+        return this.plies[Math.min(ply, this.plies.length) - 1]?.comments ?? [];
+    }
+
     /** Opponent pieces captured by `color` up to ply (exclusive end index). */
     capturedBy(color: Color, upto = this.plies.length): Record<PieceType, number> {
         const counts: Record<PieceType, number> = { p: 0, n: 0, b: 0, r: 0, q: 0, k: 0 };
@@ -205,11 +212,15 @@ export class GameRecord {
             ['TimeControl', this.timed ? `${this.tc / 1000}+0` : '-']
         ];
         if (this.reason) headers.push(['Termination', this.reason]);
-        let moves = '';
+        const formatComments = (comments: readonly string[]): string => comments.map(
+            comment => comment.includes('}') ? `; ${comment}\n` : `{${comment}} `
+        ).join('');
+        let moves = formatComments(this.initialComments);
         this.plies.forEach((p, i) => {
             if (p.color === 'w') moves += `${this.moveNumberAt(i)}. `;
             else if (i === 0) moves += `${this.moveNumberAt(i)}... `;
             moves += p.san + ' ';
+            moves += formatComments(p.comments ?? []);
         });
         const tags = new Map(headers);
         for (const [key, value] of Object.entries(this.pgnTags)) tags.set(key, value);

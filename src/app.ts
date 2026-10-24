@@ -1597,8 +1597,10 @@ function renderGameInfo(): void {
     let html = '';
     if (g) {
         const iconKind = g.kind === 'tournament' ? 'trophy' : g.kind === 'computer' ? 'cpu' : 'net';
+        const title = g.kind === 'imported' ? g.pgnTags.Event?.trim() : '';
         html += `<div class="gi-head"><div class="gi-icon ${iconKind}"></div><div>
             <div class="gi-mode">${modeLabel(g)}</div><div class="gi-time">${esc(timeAgo(g.startTs))}</div></div></div>
+            ${title && title !== '?' && title !== '*' ? `<div class="gi-title">${esc(title)}</div>` : ''}
             <div class="gi-players">
                 <div class="gi-player"><span class="side-dot w"></span>${esc(g.white.name)}</div>
                 <div class="gi-player"><span class="side-dot b"></span>${esc(g.black.name)}</div>
@@ -1685,6 +1687,9 @@ function updateClocks(): void {
 function renderMoves(): void {
     const g = S.game;
     const list = $('#moves');
+    const annotation = $('#move-annotation');
+    annotation.textContent = g ? g.commentsAt(viewPly(g)).join('\n\n') : '';
+    annotation.hidden = !annotation.textContent;
     if (!g) { list.innerHTML = '<div class="moves-empty dim">No game in progress</div>'; return; }
     const cur = viewPly(g);
     let html = '';

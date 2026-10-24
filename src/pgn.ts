@@ -26,29 +26,49 @@ function validateFen(fen: string): string {
     }
 }
 
-/** Keep the main line, ignoring comments and recursive annotation variations. */
-function mainLine(text: string): string {
-    let out = '';
+/** Keep main-line moves and comments, ignoring recursive annotation variations. */
+function mainLine(text: string): { kind: 'move' | 'comment'; text: string }[] {
+    const tokens: { kind: 'move' | 'comment'; text: string }[] = [];
+    let moveText = '';
+    let commentText = '';
     let variation = 0;
     let comment = false;
     let lineComment = false;
+    const flushMoves = (): void => {
+        for (const move of moveText.replace(/\$\d+/g, ' ').trim().split(/\s+/)) {
+            if (move) tokens.push({ kind: 'move', text: move });
+        }
+        moveText = '';
+    };
+    const flushComment = (): void => {
+        const normalized = commentText.replace(/\s+/g, ' ').trim();
+        if (!variation && normalized) tokens.push({ kind: 'comment', text: normalized });
+        commentText = '';
+    };
     for (const ch of text) {
         if (lineComment) {
-            if (ch === '\n' || ch === '\r') { lineComment = false; out += ' '; }
+            if (ch === '\n' || ch === '\r') { lineComment = false; flushComment(); }
+            else commentText += ch;
             continue;
         }
-        if (comment) { if (ch === '}') comment = false; continue; }
-        if (ch === '{') { comment = true; out += ' '; }
-        else if (ch === ';') { lineComment = true; out += ' '; }
-        else if (ch === '(') { variation++; out += ' '; }
+        if (comment) {
+            if (ch === '}') { comment = false; flushComment(); }
+            else commentText += ch;
+            continue;
+        }
+        if (ch === '{') { flushMoves(); comment = true; }
+        else if (ch === ';') { flushMoves(); lineComment = true; }
+        else if (ch === '(') { flushMoves(); variation++; }
         else if (ch === ')') {
             if (!variation) throw new PgnError('Unexpected closing variation parenthesis.');
-            variation--; out += ' ';
+            variation--;
         } else if (ch === '}') throw new PgnError('Unexpected closing comment brace.');
-        else if (!variation) out += ch;
+        else if (!variation) moveText += ch;
     }
     if (comment || variation) throw new PgnError('A comment or variation is not closed.');
-    return out.replace(/\$\d+/g, ' ');
+    if (lineComment) flushComment();
+    flushMoves();
+    return tokens;
 }
 
 /** Import one game or FEN position as a local, read-only record. */
@@ -82,9 +102,14 @@ export function importPgn(input: string, id: string, at = Date.now()): GameRecor
         black: { addr: `${id}:black`, name: tags.Black || 'Black' }, tc: 0, startTs, pgnTags: tags, startFen
     });
     let marker: string | null = null;
-    const tokens = mainLine(text).trim().split(/\s+/);
+    const tokens = mainLine(text);
     for (const token of tokens) {
-        const move = token.replace(/^\d+\.(?:\.\.)?/, '');
+        if (token.kind === 'comment') {
+            const comments = g.plies.length ? (g.plies[g.plies.length - 1].comments ??= []) : g.initialComments;
+            comments.push(token.text);
+            continue;
+        }
+        const move = token.text.replace(/^\d+\.(?:\.\.)?/, '');
         if (!move || move === '...' || /^[!?]+$/.test(move) || move === 'e.p.') continue;
         if (marker) throw new PgnError('Unexpected text after the result. Import one game at a time.');
         if (RESULTS.includes(move)) { marker = move; continue; }

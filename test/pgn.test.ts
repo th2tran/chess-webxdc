@@ -152,7 +152,65 @@ test('accepts code fences, attached move numbers, annotations, comments, NAGs an
     assert.deepEqual(g.plies.map((p) => p.uci), ['e2e4', 'e7e5', 'g1f3', 'b8c6']);
     assert.equal(g.result, null);
     assert.equal(g.over, true);
+    assert.deepEqual(g.commentsAt(1), ['hello']);
+    assert.deepEqual(g.commentsAt(3), ['comment']);
     assert.match(g.pgn(), /\[Result "\*"\]/);
+});
+
+test('retains the supplied Albin annotations for each playback step and PGN round trip', () => {
+    const g = importPgn(`[Event "Albin Countergambit - 2...e5"]
+[Site "?"]
+[ECO "D08"]
+
+1. d4 {Claim the center.} d5 {Counter-claim the center.}
+2. c4 {Attack d5.} e5 {Counter-gambit: attack d4 and offer a pawn back.}
+3. dxe5 {Capture; if White declines with e3 the gambit is unsound.} d4
+ {Strike at e3 and disrupt White's setup.}
+4. e3 {Defend e5 and block the d4-pawn.} Nc6 {Develop and prepare ...Nxe5
+ or ...dxe3.}
+5. Nf3 {Develop; the e5-pawn is a target.}`, 'albin');
+    const expected = [
+        [],
+        ['Claim the center.'],
+        ['Counter-claim the center.'],
+        ['Attack d5.'],
+        ['Counter-gambit: attack d4 and offer a pawn back.'],
+        ['Capture; if White declines with e3 the gambit is unsound.'],
+        ["Strike at e3 and disrupt White's setup."],
+        ['Defend e5 and block the d4-pawn.'],
+        ['Develop and prepare ...Nxe5 or ...dxe3.'],
+        ['Develop; the e5-pawn is a target.']
+    ];
+    assert.equal(g.plies.length, 9);
+    const roundTrip = importPgn(g.pgn(), 'again');
+    for (let ply = 0; ply <= g.plies.length; ply++) {
+        assert.deepEqual(g.commentsAt(ply), expected[ply]);
+        assert.deepEqual(roundTrip.commentsAt(ply), expected[ply]);
+        assert.equal(roundTrip.fenAt(ply), g.fenAt(ply));
+    }
+    assert.equal(roundTrip.pgnTags.ECO, 'D08');
+});
+
+test('keeps initial, adjacent, trailing and line comments but excludes variation comments', () => {
+    const g = importPgn(`{Introduction}
+; Starting position
+1.e4{First}{Second} (1.d4 {Ignored} (1.c4 ; Also ignored
+) d5) e5 2.Nf3 ; <b>Develop</b> } safely
+Nc6 * {Final} ; End of file`, 'comments');
+    assert.deepEqual(g.commentsAt(0), ['Introduction', 'Starting position']);
+    assert.deepEqual(g.commentsAt(1), ['First', 'Second']);
+    assert.deepEqual(g.commentsAt(2), []);
+    assert.deepEqual(g.commentsAt(3), ['<b>Develop</b> } safely']);
+    assert.deepEqual(g.commentsAt(4), ['Final', 'End of file']);
+    // Navigating backwards must not retain a later move's comment.
+    assert.deepEqual(g.commentsAt(2), []);
+    const roundTrip = importPgn(g.pgn(), 'again');
+    for (let ply = 0; ply <= g.plies.length; ply++) {
+        assert.deepEqual(roundTrip.commentsAt(ply), g.commentsAt(ply));
+    }
+    const position = importPgn(`[FEN "${PUZZLE_FEN}"]\n{Find the mate.} *`, 'position');
+    assert.deepEqual(position.commentsAt(0), ['Find the mate.']);
+    assert.deepEqual(importPgn(position.pgn(), 'again').commentsAt(0), ['Find the mate.']);
 });
 
 test('imports unfinished games, result-only headers, castling, and inferred checkmate', () => {
