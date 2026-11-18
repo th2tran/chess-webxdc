@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { GameRecord, type GameKind } from '../src/game.ts';
-import { canRequestHint, describeHint, matchesCoachAvailability, matchesHintResponse, waitForCoachHint } from '../src/learner.ts';
+import { canRequestHint, coachConnectionTransition, describeHint, matchesCoachAvailability, matchesHintResponse, waitForCoachHint } from '../src/learner.ts';
 import { APP_ID, type MessageOf } from '../src/net.ts';
 import { bestMove } from '../src/ai.ts';
 import { Chess } from '../src/engine.ts';
@@ -25,6 +25,15 @@ test('coach startup availability must be fresh and match the requesting player a
     assert.equal(matchesCoachAvailability({ ...reply, requestId: 'old' }, pending, 'me', 20_200), false);
     assert.equal(matchesCoachAvailability({ ...reply, ts: 1 }, pending, 'me', 20_200), false);
     assert.equal(matchesCoachAvailability({ ...reply, ts: 90_000 }, pending, 'me', 20_200), false);
+});
+
+test('coach connection logging changes only when availability changes', () => {
+    assert.equal(coachConnectionTransition('unknown', true), 'available');
+    assert.equal(coachConnectionTransition('unknown', false), 'unavailable');
+    assert.equal(coachConnectionTransition('available', true), null);
+    assert.equal(coachConnectionTransition('available', false), 'unavailable');
+    assert.equal(coachConnectionTransition('unavailable', false), null);
+    assert.equal(coachConnectionTransition('unavailable', true), 'available');
 });
 
 test('coach timeout falls back once at 30 seconds and stops retry broadcasts', t => {

@@ -2,6 +2,16 @@ import { Chess, type Color } from './engine.ts';
 import type { GameRecord } from './game.ts';
 import type { MessageOf } from './net.ts';
 
+export type CoachConnectionState = 'unknown' | 'available' | 'unavailable';
+
+export function coachConnectionTransition(
+    current: CoachConnectionState,
+    available: boolean
+): CoachConnectionState | null {
+    const next = available ? 'available' : 'unavailable';
+    return current === next ? null : next;
+}
+
 export function matchesCoachAvailability(
     response: MessageOf<'coach-available'>,
     pending: { requestId: string; sentAt: number },

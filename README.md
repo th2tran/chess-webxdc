@@ -44,6 +44,7 @@ For a learner-mode computer-game startup, it also triggers a one-time toast: **C
 and can provide a suggestion when you request HINT.** This checks the live
 coach service without starting a Stockfish search. The Puzzles button disappears if fresh replies stop arriving. No toast is shown for absent
 coaches, non-learner games, historical replies or replies for another game start.
+The Logging panel records live incoming coach availability, puzzle, and hint messages, when coach availability is established or lost, and when a puzzle or hint response succeeds. Repeated probe failures are reported only when availability changes.
 
 Messages use the existing `chess-xdc/1` envelope (`app`, unique `id`, `from`, `name`, `ts` in milliseconds). A `hint-request` contains `requestId`, `gameId`, `fen`, `startFen` and `moves` (UCI strings). A `hint-response` echoes `requestId`, `gameId`, `fen`, adds `to` (the request's `from`), and contains either `uci` or `error`. Retries retain the same request ID. Responses only suggest a move; they never apply it. These application-level addresses correlate replies but do not authenticate the coach on the realtime channel.
 
@@ -81,6 +82,12 @@ Select **Play from here** in the imported-game panel to start a computer game fr
 The importer accepts SAN moves, optional move numbers, comments, annotations, and variations (only the main line is imported). Main-line comments in `{braces}` (including multiline comments) or following `;` are retained and included in **Copy PGN** exports. During playback, the comment for the currently displayed move appears below the navigation controls; comments before the first move appear at the starting position. Moves without comments show no annotation. Comments inside variations are not imported. It also accepts a surrounding Markdown code block and the clipped first `Event` header sometimes produced when selecting text in chat. Custom starting positions are supported with `[SetUp "1"]` and a `[FEN "..."]` header, including puzzle positions with no moves and just `*` as the movetext. A FEN header without SetUp is also accepted. The starting position, side to move, and move numbering are preserved for review and export. Illegal moves, malformed headers or FEN positions, conflicting results, and multiple games are rejected with an error so you can correct the pasted text. Finish any active network game before importing.
 
 ## Development
+
+Tap or click the **XDC-Chess** brand name seven times to open the hidden **Logging** panel (or focus it and press Enter/Space seven times). Repeat to reopen it after closing. It shows the latest 300 console entries and uncaught errors, including those captured before opening, with live updates, **Error**, **Warn**, **Info**, and **Debug** filters, and a **Clear** button. Console `log` entries are included by the **Info** filter. Entries are truncated to 2,000 characters. Log entries are held only in memory on this device and reset when the app reloads; the panel's dock, position, and sizes are saved locally when you close the panel or the app.
+
+Logging is a non-modal overlay: the game remains usable while it is open. Drag its title to move it, or use **Dock left**, **Dock right**, **Dock bottom**, and **Float**. Dropping the title within 24 pixels of the left, right, or bottom screen edge also docks it there (bottom takes priority at corners). The bottom dock spans the window width. Docking anchors the panel over that edge without resizing the board. Its position is retained when closed and reopened within the session; resizing the window keeps the floating panel on screen. **Close**, or Escape while focused inside the panel, hides it.
+
+Resize a floating panel using its bottom-right grip. For a left dock, drag anywhere along its right edge; for a right dock, drag its left edge. For a bottom dock, drag anywhere along its top edge. The resize handle also supports arrow keys when focused. Sizes are saved separately for each docking mode and constrained to the window.
 
 Requires Node.js. Sources are TypeScript (`src/`, bundled with esbuild) and SCSS (`src/styles/`, compiled with sass).
 

@@ -23,7 +23,14 @@
     gap: 6px;
     margin-right: auto;
     .brand-logo { font-size: 26px; color: $text-strong; }
-    .brand-name { font-size: 22px; color: $text-strong; font-weight: 300; }
+    .brand-name {
+        font-size: 22px;
+        color: $text-strong;
+        font-weight: 300;
+        user-select: none;
+        touch-action: manipulation;
+        &:focus-visible { outline: 2px solid $accent; }
+    }
     .version { font-size: 11px; color: $dim; }
 }
 

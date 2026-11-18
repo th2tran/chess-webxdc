@@ -10,9 +10,10 @@ import { $, esc, formatClock, formatDuration, loadJson, Modals, saveJson, Sounds
 import type { AiRequest, AiResponse } from './ai-worker.ts';
 import { canMove, canEndGame, canDeclineDraw, canForfeitOnExit, exitForfeitResult, validClock, validSync, syncClock, pruneCompletedGames, MAX_PENDING_MOVES } from './protocol.ts';
 import { importPgn, PgnError } from './pgn.ts';
-import { canRequestHint, describeHint, matchesCoachAvailability, matchesHintResponse, waitForCoachHint } from './learner.ts';
+import { canRequestHint, coachConnectionTransition, describeHint, matchesCoachAvailability, matchesHintResponse, waitForCoachHint, type CoachConnectionState } from './learner.ts';
 import { ChatHistory } from './chat.ts';
 import { PUZZLE_TYPES, Puzzle, matchesPuzzleResponse, puzzleContinuation, puzzleThemeLabel, validPuzzleType } from './puzzles.ts';
+import { installLogging } from './logging.ts';
 
 type Mode = 'computer' | 'network' | 'tournament' | 'puzzles';
 type Tab = 'peers' | 'chat' | 'standings';
@@ -59,10 +60,12 @@ const STORAGE_PREFS = 'chess-xdc:prefs';
 const STORAGE_COMPUTER = 'chess-xdc:computer-game';
 const STORAGE_DISMISSED_TOUR = 'chess-xdc:dismissed-tour';
 
+const modals = new Modals($('#modal-root'));
+installLogging($('.brand-name'));
+
 const net = new Net();
 const me: PlayerRef = net.me;
 const sounds = new Sounds();
-const modals = new Modals($('#modal-root'));
 const appStart = Date.now();
 const chat = new ChatHistory();
 
@@ -187,6 +190,10 @@ function touchPeer(addr: string, name: string, ts: number): Peer {
 // ---------------------------------------------------------------- message handling
 
 function handleMessage(msg: Message, ctx: ReceiveContext): void {
+    if (!ctx.local && !ctx.replay
+        && (msg.type === 'coach-available' || msg.type === 'puzzle-response' || msg.type === 'hint-response')) {
+        console.debug('chess: received Chess Coach message', msg);
+    }
     if (msg.type === 'coach-probe') return;
     if (msg.type === 'coach-available') {
         if (!ctx.local && !ctx.replay) onCoachAvailable(msg);
@@ -918,19 +925,46 @@ function startComputerGame(color: Color | 'random', level: number, restore?: Sav
 }
 
 let coachProbe: { game?: GameRecord; requestId: string; sentAt: number } | null = null;
+let coachProbeTimer: number | null = null;
 let availableCoach: { addr: string; until: number } | null = null;
+let coachConnectionState: CoachConnectionState = 'unknown';
+
+function reportCoachConnection(available: boolean): void {
+    const previous = coachConnectionState;
+    const next = coachConnectionTransition(coachConnectionState, available);
+    if (!next) return;
+    coachConnectionState = next;
+    if (available) {
+        console.info(previous === 'unavailable'
+            ? 'chess: Chess Coach connection re-established'
+            : 'chess: Chess Coach connection established');
+        return;
+    }
+    console.warn('chess: Chess Coach unavailable (no response to availability probe)');
+}
 
 function probeChessCoach(game?: GameRecord): void {
     if (!net.available) return;
     coachProbe = { game, requestId: randomId('coach'), sentAt: now() };
+    const pending = coachProbe;
+    if (coachProbeTimer !== null) window.clearTimeout(coachProbeTimer);
+    coachProbeTimer = window.setTimeout(() => {
+        if (coachProbe !== pending) return;
+        coachProbe = null;
+        coachProbeTimer = null;
+        if (!coachAvailable()) reportCoachConnection(false);
+    }, 10_000);
     net.send({ type: 'coach-probe', requestId: coachProbe.requestId });
 }
 
 function onCoachAvailable(msg: MessageOf<'coach-available'>): void {
     const pending = coachProbe;
     if (!pending || !matchesCoachAvailability(msg, pending, me.addr, now())) return;
+    if (coachProbeTimer !== null) window.clearTimeout(coachProbeTimer);
+    coachProbeTimer = null;
     availableCoach = { addr: msg.from, until: now() + 30_000 };
     coachProbe = null;
+    reportCoachConnection(true);
     if (pending.game === S.game && pending.game?.learnerMode && !pending.game.over) {
         toast('Chess Coach is available and can provide a suggestion when you request HINT in VS-COMPUTER mode.', 'info', 6000);
     }
@@ -986,6 +1020,7 @@ function requestPuzzle(): void {
     }, () => {
         if (puzzleRequest !== pending) return;
         cancelPuzzleRequest();
+        console.warn('chess: Chess Coach puzzle request timed out');
         toast('Chess coach did not return a puzzle within 30 seconds. Its Lichess database may still be downloading or preparing. Please try again later.', 'warn');
         render();
     });
@@ -1003,6 +1038,7 @@ function onPuzzleResponse(msg: MessageOf<'puzzle-response'>): void {
         if (typeof msg.error === 'string') throw new PgnError(`Chess coach: ${msg.error.slice(0, 200)}`);
         if (typeof msg.pgn !== 'string') throw new PgnError('Chess coach returned no puzzle PGN.');
         puzzle = new Puzzle(msg.pgn, pending.gameId, me, now(), msg.themes);
+        console.info('chess: Chess Coach returned a puzzle');
         S.game = puzzle.game;
         S.flipped = false;
         toast('Find the next move. The computer will play the puzzle replies.', 'info');
@@ -1193,6 +1229,7 @@ function onHintResponse(msg: MessageOf<'hint-response'>): void {
     }
     search.cancelWait?.();
     const move = new Chess(search.fen).move(msg.uci)!;
+    console.info('chess: Chess Coach returned a hint');
     search.move = { from: move.from, to: move.to, label, promotion: move.promotion };
     scheduleRender();
 }
